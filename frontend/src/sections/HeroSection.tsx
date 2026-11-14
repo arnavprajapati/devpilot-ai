@@ -1,6 +1,10 @@
 import { ArrowRight, CheckCircle2 } from 'lucide-react';
 
-export function HeroSection() {
+interface HeroSectionProps {
+  onNavigate?: (view: 'landing' | 'login' | 'signup' | 'dashboard') => void;
+}
+
+export function HeroSection({ onNavigate }: HeroSectionProps) {
   return (
     <section className="relative pt-12 pb-16 md:pt-20 md:pb-24 overflow-hidden text-center">
       <div className="absolute top-1/4 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[350px] bg-gradient-to-tr from-[#FF4055]/10 via-[#FF8A1C]/10 to-transparent blur-3xl pointer-events-none -z-10 rounded-full" />
@@ -29,13 +33,14 @@ export function HeroSection() {
         </p>
 
         <div className="flex flex-col sm:flex-row items-center justify-center gap-4 mb-12">
-          <a
-            href="#demo"
-            className="w-full sm:w-auto inline-flex items-center justify-center gap-2.5 px-8 py-3.5 rounded-xl bg-black text-white text-base font-semibold hover:bg-zinc-800 transition-all shadow-md hover:shadow-lg group"
+          <button
+            type="button"
+            onClick={() => (onNavigate ? onNavigate('signup') : null)}
+            className="w-full sm:w-auto inline-flex items-center justify-center gap-2.5 px-8 py-3.5 rounded-xl bg-black text-white text-base font-semibold hover:bg-zinc-800 transition-all shadow-md hover:shadow-lg group cursor-pointer"
           >
             <span>Get Started</span>
             <ArrowRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
-          </a>
+          </button>
           <a
             href="#features"
             className="w-full sm:w-auto inline-flex items-center justify-center px-8 py-3.5 rounded-xl border border-zinc-200 bg-white text-zinc-800 text-base font-semibold hover:bg-zinc-50 hover:border-zinc-300 transition-all shadow-xs"

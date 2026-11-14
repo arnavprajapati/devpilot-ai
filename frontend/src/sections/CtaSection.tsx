@@ -3,7 +3,11 @@ import { GithubIcon } from '../components/GithubIcon';
 
 const GITHUB_REPO_URL = 'https://github.com';
 
-export function CtaSection() {
+interface CtaSectionProps {
+  onNavigate?: (view: 'landing' | 'login' | 'signup' | 'dashboard') => void;
+}
+
+export function CtaSection({ onNavigate }: CtaSectionProps) {
   return (
     <section className="py-16 w-full max-w-[1536px] mx-auto px-4 sm:px-8 lg:px-12">
       <div className="rounded-3xl bg-black text-white p-8 sm:p-14 text-center relative overflow-hidden border border-zinc-800 shadow-2xl">
@@ -21,13 +25,14 @@ export function CtaSection() {
             projects with clarity.
           </p>
           <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
-            <a
-              href="#demo"
-              className="w-full sm:w-auto px-8 py-3.5 rounded-xl bg-white text-black font-semibold text-sm hover:bg-zinc-100 transition-all shadow-md flex items-center justify-center gap-2"
+            <button
+              type="button"
+              onClick={() => (onNavigate ? onNavigate('signup') : null)}
+              className="w-full sm:w-auto px-8 py-3.5 rounded-xl bg-white text-black font-semibold text-sm hover:bg-zinc-100 transition-all shadow-md flex items-center justify-center gap-2 cursor-pointer"
             >
               <span>Get Started Free</span>
               <ArrowRight className="w-4 h-4" />
-            </a>
+            </button>
             <a
               href={GITHUB_REPO_URL}
               target="_blank"
