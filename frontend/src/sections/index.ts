@@ -4,3 +4,6 @@ export * from './StatsSection';
 export * from './FeaturesSection';
 export * from './HowItWorksSection';
 export * from './CtaSection';
+export * from './LoginView';
+export * from './SignupView';
+export * from './DashboardView';
