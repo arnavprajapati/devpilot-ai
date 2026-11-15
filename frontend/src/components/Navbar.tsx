@@ -18,7 +18,7 @@ interface NavbarProps {
 
 export function Navbar({ onNavigate }: NavbarProps) {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
-  const { user, isAuthenticated, logout } = useAuth();
+  const { isAuthenticated, logout } = useAuth();
 
   return (
     <header className="sticky top-0 z-50 bg-white/90 backdrop-blur-md border-b border-zinc-100 transition-all">
@@ -57,7 +57,7 @@ export function Navbar({ onNavigate }: NavbarProps) {
                 className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-black text-white text-xs font-semibold hover:bg-zinc-800 transition-all cursor-pointer shadow-xs"
               >
                 <LayoutDashboard className="w-3.5 h-3.5" />
-                <span>Dashboard ({user?.full_name?.split(' ')[0] || 'User'})</span>
+                <span>Dashboard</span>
               </button>
               <button
                 type="button"

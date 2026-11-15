@@ -14,28 +14,31 @@ import { DashboardView } from './sections/DashboardView';
 
 type ViewMode = 'landing' | 'login' | 'signup' | 'dashboard';
 
+function getViewFromUrl(): ViewMode {
+  const path = window.location.pathname.replace(/^\/+|\/+$/g, '').toLowerCase();
+  const hash = window.location.hash.replace(/^#+/, '').toLowerCase();
+  const target = path || hash;
+  if (target === 'login' || target === 'signup' || target === 'dashboard') {
+    return target as ViewMode;
+  }
+  return 'landing';
+}
+
 function AppContent() {
   const { isAuthenticated, isLoading } = useAuth();
-  const [currentView, setCurrentView] = useState<ViewMode>(() => {
-    const hash = window.location.hash.replace('#', '');
-    if (hash === 'login' || hash === 'signup' || hash === 'dashboard') {
-      return hash as ViewMode;
-    }
-    return 'landing';
-  });
+  const [currentView, setCurrentView] = useState<ViewMode>(getViewFromUrl);
 
   useEffect(() => {
-    const handleHashChange = () => {
-      const hash = window.location.hash.replace('#', '');
-      if (hash === 'login' || hash === 'signup' || hash === 'dashboard') {
-        setCurrentView(hash as ViewMode);
-      } else if (!hash) {
-        setCurrentView('landing');
-      }
+    const handleUrlChange = () => {
+      setCurrentView(getViewFromUrl());
     };
 
-    window.addEventListener('hashchange', handleHashChange);
-    return () => window.removeEventListener('hashchange', handleHashChange);
+    window.addEventListener('popstate', handleUrlChange);
+    window.addEventListener('hashchange', handleUrlChange);
+    return () => {
+      window.removeEventListener('popstate', handleUrlChange);
+      window.removeEventListener('hashchange', handleUrlChange);
+    };
   }, []);
 
   useEffect(() => {
@@ -43,22 +46,20 @@ function AppContent() {
 
     if (currentView === 'dashboard' && !isAuthenticated) {
       setCurrentView('login');
-      window.location.hash = 'login';
+      window.history.replaceState(null, '', '/login');
     } else if ((currentView === 'login' || currentView === 'signup') && isAuthenticated) {
       setCurrentView('dashboard');
-      window.location.hash = 'dashboard';
+      window.history.replaceState(null, '', '/dashboard');
     }
   }, [currentView, isAuthenticated, isLoading]);
 
   const handleNavigate = (view: ViewMode) => {
     setCurrentView(view);
-    if (view === 'landing') {
-      window.history.pushState(null, '', window.location.pathname);
-      window.scrollTo({ top: 0, behavior: 'smooth' });
-    } else {
-      window.location.hash = view;
-      window.scrollTo({ top: 0, behavior: 'smooth' });
+    const targetUrl = view === 'landing' ? '/' : `/${view}`;
+    if (window.location.pathname !== targetUrl || window.location.hash) {
+      window.history.pushState(null, '', targetUrl);
     }
+    window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
   if (currentView === 'login') {
