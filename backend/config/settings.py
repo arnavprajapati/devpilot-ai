@@ -1,6 +1,10 @@
+import os
 from pathlib import Path
+from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+load_dotenv(BASE_DIR / '.env')
+load_dotenv(BASE_DIR.parent / '.env')
 
 SECRET_KEY = 'django-insecure-g%tjgin@aeyg!iu+@n9t(4%ok0xntkb0puho^+i3=0t@mj0&dz'
 
@@ -18,6 +22,7 @@ INSTALLED_APPS = [
     'corsheaders',
     'rest_framework',
     'accounts',
+    'projects',
 ]
 
 MIDDLEWARE = [
@@ -109,3 +114,4 @@ REST_FRAMEWORK = {
         'rest_framework.permissions.AllowAny',
     ],
 }
+
