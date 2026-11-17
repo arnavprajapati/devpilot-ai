@@ -19,11 +19,11 @@ export function HeroSection({ onNavigate }: HeroSectionProps) {
 
         <h1 className="text-4xl sm:text-6xl lg:text-7xl font-extrabold tracking-tight text-zinc-950 mb-6 leading-[1.12]">
           From Idea to{' '}
-          <span className="relative inline-block">
+          <span className="relative inline-block group cursor-pointer select-none">
             <span className="bg-gradient-to-r from-[#FF4055] to-[#FF8A1C] bg-clip-text text-transparent">
               Execution.
             </span>
-            <span className="absolute -bottom-2 left-0 w-full h-[4px] rounded-full bg-gradient-to-r from-[#FF4055] to-[#FF8A1C]" />
+            <span className="absolute -bottom-1.5 sm:-bottom-2 left-1/2 -translate-x-1/2 w-16 sm:w-24 h-[3.5px] sm:h-[4px] rounded-full bg-gradient-to-r from-[#FF4055] to-[#FF8A1C] group-hover:w-full transition-all duration-300 ease-out" />
           </span>
         </h1>
 
