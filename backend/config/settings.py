@@ -23,6 +23,7 @@ INSTALLED_APPS = [
     'rest_framework',
     'accounts',
     'projects',
+    'ai_engine',
 ]
 
 MIDDLEWARE = [
@@ -114,4 +115,7 @@ REST_FRAMEWORK = {
         'rest_framework.permissions.AllowAny',
     ],
 }
+
+GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '')
+GEMINI_MODEL = os.environ.get('GEMINI_MODEL', 'gemini-3.6-flash')
 
