@@ -18,6 +18,7 @@ import { nodeTypes } from './customNodes';
 import { WhiteboardHeader } from './WhiteboardHeader';
 import { EditNodeModal } from './EditNodeModal';
 import { ResetLayoutModal } from './ResetLayoutModal';
+import { useTheme } from '../../context/ThemeContext';
 
 interface RoadmapWhiteboardProps {
   projectId: number;
@@ -25,6 +26,8 @@ interface RoadmapWhiteboardProps {
 }
 
 export function RoadmapWhiteboard({ projectId, roadmap }: RoadmapWhiteboardProps) {
+  const { theme } = useTheme();
+  const isDark = theme === 'dark';
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -450,8 +453,18 @@ export function RoadmapWhiteboard({ projectId, roadmap }: RoadmapWhiteboardProps
 
       <div className="flex-1 w-full h-full relative">
         {isLoading ? (
-          <div className="w-full h-full flex flex-col items-center justify-center bg-white text-zinc-500">
-            <div className="w-8 h-8 rounded-full border-2 border-zinc-300 border-t-black animate-spin mb-3" />
+          <div
+            className={`w-full h-full flex flex-col items-center justify-center ${
+              isDark ? 'bg-[#08090B] text-[#A6A4A0]' : 'bg-[#F7F3EA] text-[#6B665E]'
+            }`}
+          >
+            <div
+              className={`w-8 h-8 rounded-full border-2 animate-spin mb-3 ${
+                isDark
+                  ? 'border-[#242321] border-t-[#FFC900]'
+                  : 'border-[#E8E1D5] border-t-[#D9A300]'
+              }`}
+            />
             <p className="text-xs font-medium">Rendering Interactive Whiteboard...</p>
           </div>
         ) : (
@@ -470,20 +483,28 @@ export function RoadmapWhiteboard({ projectId, roadmap }: RoadmapWhiteboardProps
             }}
             defaultEdgeOptions={{
               type: 'smoothstep',
-              style: { stroke: '#71717a', strokeWidth: 2 },
+              style: { stroke: isDark ? '#A6A4A0' : '#8C857B', strokeWidth: 2 },
             }}
             fitView
             minZoom={0.15}
             maxZoom={2.5}
-            className="bg-zinc-50/60"
+            className={isDark ? 'bg-[#08090B]' : 'bg-[#F7F3EA]'}
           >
-            <Background color="#e4e4e7" gap={20} size={1} />
-            <Controls className="!bg-white !border-zinc-200 !text-zinc-700 fill-zinc-700 !shadow-sm !rounded-xl overflow-hidden cursor-pointer" />
+            <Background color={isDark ? '#242321' : '#E8E1D5'} gap={20} size={1.2} />
+            <Controls
+              className={
+                isDark
+                  ? '!bg-[#18191D] !border-[#242321] !text-[#F5F3EF] fill-[#F5F3EF] !shadow-lg !rounded-xl overflow-hidden cursor-pointer'
+                  : '!bg-white !border-[#E8E1D5] !text-[#171717] fill-[#171717] !shadow-xs !rounded-xl overflow-hidden cursor-pointer'
+              }
+            />
             <MiniMap
-              nodeStrokeColor="#cbd5e1"
-              nodeColor="#f4f4f5"
-              maskColor="rgba(255, 255, 255, 0.7)"
-              className="!bg-white !border-zinc-200 !rounded-xl !shadow-sm hidden sm:block"
+              nodeStrokeColor={isDark ? '#343330' : '#cbd5e1'}
+              nodeColor={isDark ? '#18191D' : '#f4f4f5'}
+              maskColor={isDark ? 'rgba(8, 9, 11, 0.75)' : 'rgba(247, 243, 234, 0.75)'}
+              className={`!rounded-xl hidden sm:block ${
+                isDark ? '!bg-[#08090B] !border-[#242321] !shadow-lg' : '!bg-white !border-[#E8E1D5] !shadow-xs'
+              }`}
             />
           </ReactFlow>
         )}
