@@ -1,10 +1,10 @@
 import { useState, useEffect } from 'react';
 import { AuthProvider, useAuth } from './context/AuthContext';
+import { ThemeProvider, useTheme } from './context/ThemeContext';
 import { Navbar } from './components/Navbar';
 import { Footer } from './components/Footer';
 import { HeroSection } from './sections/HeroSection';
 import { RoadmapSimulationSection } from './sections/RoadmapSimulationSection';
-import { StatsSection } from './sections/StatsSection';
 import { FeaturesSection } from './sections/FeaturesSection';
 import { HowItWorksSection } from './sections/HowItWorksSection';
 import { CtaSection } from './sections/CtaSection';
@@ -77,15 +77,23 @@ function AppContent() {
     return <DashboardView onNavigate={handleNavigate} />;
   }
 
+  const { theme } = useTheme();
+  const isDark = theme === 'dark';
+
   return (
-    <div className="min-h-screen bg-white text-zinc-900 selection:bg-[#FF4055]/15 selection:text-[#FF4055]">
+    <div
+      className={`min-h-screen transition-colors duration-300 ${
+        isDark
+          ? 'bg-[#08090B] text-[#F5F3EF] selection:bg-[#FFC900]/25 selection:text-[#FFC900]'
+          : 'bg-[#F7F3EA] text-[#171717] selection:bg-[#D9A300]/25 selection:text-[#D9A300]'
+      }`}
+    >
       <Navbar onNavigate={handleNavigate} />
       <main>
         <HeroSection onNavigate={handleNavigate} />
         <RoadmapSimulationSection />
-        <StatsSection />
-        <FeaturesSection />
-        <HowItWorksSection />
+        <FeaturesSection onNavigate={handleNavigate} />
+        <HowItWorksSection onNavigate={handleNavigate} />
         <CtaSection onNavigate={handleNavigate} />
       </main>
       <Footer />
@@ -95,8 +103,10 @@ function AppContent() {
 
 export default function App() {
   return (
-    <AuthProvider>
-      <AppContent />
-    </AuthProvider>
+    <ThemeProvider>
+      <AuthProvider>
+        <AppContent />
+      </AuthProvider>
+    </ThemeProvider>
   );
 }
