@@ -847,6 +847,7 @@ export function DashboardView({ onNavigate }: DashboardViewProps) {
                 toggleTaskCompleted={toggleTaskCompleted}
                 expandedPhases={expandedPhases}
                 togglePhaseExpanded={togglePhaseExpanded}
+                onRoadmapUpdated={(updated) => setRoadmap(updated)}
               />
             ) : detailsTab === 'whiteboard' ? (
               <div className="w-full flex-1 flex flex-col min-h-[640px]">
