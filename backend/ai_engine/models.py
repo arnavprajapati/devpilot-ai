@@ -63,3 +63,24 @@ class RoadmapWhiteboard(models.Model):
 
     def __str__(self):
         return f"Whiteboard for {self.roadmap.title}"
+
+
+class ProjectDatabaseSchema(models.Model):
+    project = models.ForeignKey('projects.Project', on_delete=models.CASCADE, related_name='database_schemas')
+    schema_type = models.CharField(max_length=20, default='table')
+    db_engine = models.CharField(max_length=50, default='PostgreSQL')
+    tables = models.JSONField(default=list)
+    nodes = models.JSONField(default=list)
+    edges = models.JSONField(default=list)
+    viewport = models.JSONField(default=dict, blank=True)
+    sql_ddl = models.TextField(blank=True, default='')
+    nosql_code = models.TextField(blank=True, default='')
+    is_customized = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ('project', 'schema_type')
+
+    def __str__(self):
+        return f"Database Schema for {self.project.name} ({self.schema_type})"

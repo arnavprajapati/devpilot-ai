@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Roadmap, RoadmapMilestone, RoadmapPhase, RoadmapTask, RoadmapWhiteboard
+from .models import Roadmap, RoadmapMilestone, RoadmapPhase, RoadmapTask, RoadmapWhiteboard, ProjectDatabaseSchema
 
 
 class RoadmapTaskSerializer(serializers.ModelSerializer):
@@ -61,3 +61,24 @@ class RoadmapWhiteboardSerializer(serializers.ModelSerializer):
             'updated_at',
         ]
         read_only_fields = ['id', 'roadmap', 'created_at', 'updated_at']
+
+
+class ProjectDatabaseSchemaSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ProjectDatabaseSchema
+        fields = [
+            'id',
+            'project',
+            'schema_type',
+            'db_engine',
+            'tables',
+            'nodes',
+            'edges',
+            'viewport',
+            'sql_ddl',
+            'nosql_code',
+            'is_customized',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = ['id', 'project', 'created_at', 'updated_at']
