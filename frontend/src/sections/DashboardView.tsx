@@ -1,9 +1,8 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import type { FormEvent } from 'react';
-import { useAuth } from '../context/AuthContext';
-import { Logo } from '../components/Logo';
+import { useTheme } from '../context/ThemeContext';
+import { Navbar } from '../components/Navbar';
 import {
-  LogOut,
   FolderGit2,
   Plus,
   X,
@@ -12,8 +11,10 @@ import {
   Sparkles,
   RotateCcw,
   Workflow,
+  Database,
 } from 'lucide-react';
 import { RoadmapWhiteboard } from '../components/whiteboard/RoadmapWhiteboard';
+import { DatabaseSchemaCanvas } from '../components/database-schema/DatabaseSchemaCanvas';
 import { ProjectCard } from '../components/dashboard/ProjectCard';
 import { ProjectFormModal } from '../components/dashboard/ProjectFormModal';
 import { ProjectDeleteModal } from '../components/dashboard/ProjectDeleteModal';
@@ -30,7 +31,8 @@ interface DashboardViewProps {
 }
 
 export function DashboardView({ onNavigate }: DashboardViewProps) {
-  const { user, logout } = useAuth();
+  const { theme } = useTheme();
+  const isDark = theme === 'dark';
   const [projects, setProjects] = useState<Project[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -55,12 +57,14 @@ export function DashboardView({ onNavigate }: DashboardViewProps) {
   const [isRoadmapLoading, setIsRoadmapLoading] = useState(false);
   const [isGeneratingRoadmap, setIsGeneratingRoadmap] = useState(false);
   const [roadmapError, setRoadmapError] = useState<string | null>(null);
-  const [detailsTab, setDetailsTab] = useState<'roadmap' | 'whiteboard' | 'specs'>('roadmap');
+  const [detailsTab, setDetailsTab] = useState<'roadmap' | 'whiteboard' | 'database' | 'specs'>('roadmap');
   const [confirmRegenerateOpen, setConfirmRegenerateOpen] = useState(false);
   const [activePhaseIndex, setActivePhaseIndex] = useState<number>(0);
-  const [phaseViewMode, setPhaseViewMode] = useState<'grid' | 'focused' | 'all'>('grid');
+  const [phaseViewMode, setPhaseViewMode] = useState<'grid' | 'focused' | 'all'>('all');
   const [completedTaskIds, setCompletedTaskIds] = useState<Record<number, boolean>>({});
   const [expandedPhases, setExpandedPhases] = useState<Record<number, boolean>>({});
+  const dbRegenerateRef = useRef<(() => void) | null>(null);
+  const [isDatabaseGenerating, setIsDatabaseGenerating] = useState(false);
 
   const togglePhaseExpanded = (phaseId: number) => {
     setExpandedPhases((prev) => ({ ...prev, [phaseId]: !prev[phaseId] }));
@@ -76,15 +80,7 @@ export function DashboardView({ onNavigate }: DashboardViewProps) {
         }
       } catch (_) {}
 
-      const initial: Record<number, boolean> = {};
-      if (roadmap.phases[0]) {
-        roadmap.phases[0].milestones.forEach((m) => {
-          m.tasks.forEach((t) => {
-            initial[t.id] = true;
-          });
-        });
-      }
-      setCompletedTaskIds(initial);
+      setCompletedTaskIds({});
     }
   }, [selectedProject?.id, roadmap?.id]);
 
@@ -116,10 +112,15 @@ export function DashboardView({ onNavigate }: DashboardViewProps) {
     setIsGeneratingRoadmap(true);
     setRoadmapError(null);
     setConfirmRegenerateOpen(false);
+    try {
+      localStorage.removeItem(`devpilot_tasks_${projectId}`);
+    } catch (_) {}
+    setCompletedTaskIds({});
     const res = await roadmapApi.generateRoadmap(projectId);
     if (res.data?.roadmap) {
       setRoadmap(res.data.roadmap);
       setActivePhaseIndex(0);
+      setCompletedTaskIds({});
     } else {
       const rawError =
         typeof res.error === 'object' && res.error?.error
@@ -171,11 +172,6 @@ export function DashboardView({ onNavigate }: DashboardViewProps) {
     fetchTechStacks();
   }, []);
 
-  const handleLogout = async () => {
-    await logout();
-    onNavigate('landing');
-  };
-
   const openCreateModal = () => {
     setFormName('');
     setFormDescription('');
@@ -205,7 +201,7 @@ export function DashboardView({ onNavigate }: DashboardViewProps) {
     setModalMode('details');
     setDetailsTab('roadmap');
     setActivePhaseIndex(0);
-    setPhaseViewMode('focused');
+    setPhaseViewMode('all');
     fetchRoadmap(project.id);
   };
 
@@ -341,14 +337,26 @@ export function DashboardView({ onNavigate }: DashboardViewProps) {
     switch (status) {
       case 'In Progress':
         return (
-          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-[#FF4055] text-white text-[11px] font-bold shadow-2xs">
-            <span className="w-1.5 h-1.5 rounded-full bg-white" />
+          <span
+            className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 border text-xs font-semibold ${
+              isDark
+                ? 'bg-[#FFC900]/10 text-[#FFC900] border-[#FFC900]/30 shadow-[0_0_12px_rgba(255,201,0,0.1)]'
+                : 'bg-[#D9A300]/10 text-[#B38300] border-[#D9A300]/30'
+            }`}
+          >
+            <span className={`w-1.5 h-1.5 rounded-full animate-pulse ${isDark ? 'bg-[#FFC900]' : 'bg-[#D9A300]'}`} />
             In Progress
           </span>
         );
       case 'Completed':
         return (
-          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-emerald-50 text-emerald-700 border border-emerald-200 text-[11px] font-bold">
+          <span
+            className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 border text-xs font-semibold ${
+              isDark
+                ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
+                : 'bg-emerald-500/10 text-emerald-700 border-emerald-300'
+            }`}
+          >
             <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
             Completed
           </span>
@@ -356,8 +364,14 @@ export function DashboardView({ onNavigate }: DashboardViewProps) {
       case 'Planning':
       default:
         return (
-          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-zinc-100 text-zinc-700 border border-zinc-200/80 text-[11px] font-semibold">
-            <span className="w-1.5 h-1.5 rounded-full bg-blue-500" />
+          <span
+            className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 border text-xs font-medium ${
+              isDark
+                ? 'bg-white/5 text-[#A6A4A0] border-white/10'
+                : 'bg-black/5 text-[#6B665E] border-[#E8E1D5]'
+            }`}
+          >
+            <span className={`w-1.5 h-1.5 rounded-full ${isDark ? 'bg-[#A6A4A0]' : 'bg-[#6B665E]'}`} />
             Planning
           </span>
         );
@@ -378,58 +392,73 @@ export function DashboardView({ onNavigate }: DashboardViewProps) {
   };
 
   return (
-    <div className="min-h-screen bg-zinc-50/60 flex flex-col select-none">
-      <header className="sticky top-0 z-40 bg-white border-b border-zinc-200">
-        <div className="w-full max-w-[1536px] mx-auto px-4 sm:px-8 lg:px-12 h-20 flex items-center justify-between">
-          <div className="flex items-center gap-4">
-            <button
-              type="button"
-              onClick={() => onNavigate('landing')}
-              className="focus:outline-none cursor-pointer"
-            >
-              <Logo size="md" />
-            </button>
-            <span className="hidden sm:inline-block px-2.5 py-0.5 rounded-md bg-zinc-100 text-[11px] font-bold uppercase tracking-wider text-zinc-600">
-              Workspace
-            </span>
-          </div>
+    <div
+      className={`min-h-screen flex flex-col select-none transition-colors duration-300 relative overflow-hidden ${
+        isDark ? 'bg-[#08090B] text-[#F5F3EF]' : 'bg-[#F7F3EA] text-[#171717]'
+      }`}
+    >
+      <div
+        className="absolute inset-0 bg-cover bg-no-repeat bg-[position:80%_top] sm:bg-[position:75%_top] md:bg-[position:70%_top] lg:bg-center pointer-events-none transition-all duration-500 z-0 opacity-80"
+        style={{ backgroundImage: `url('${isDark ? '/bg-dark.png' : '/bg-light.png'}')` }}
+      />
+      <div
+        className={`absolute inset-0 pointer-events-none transition-all duration-300 z-0 ${
+          isDark
+            ? 'bg-gradient-to-b from-transparent via-[#08090B]/80 to-[#08090B]'
+            : 'bg-gradient-to-b from-transparent via-[#F7F3EA]/80 to-[#F7F3EA]'
+        }`}
+      />
+      <div className="absolute top-20 left-1/2 -translate-x-1/2 w-[700px] h-[350px] bg-gradient-to-b from-[#FFC900]/10 via-[#FF8A1C]/5 to-transparent rounded-full blur-3xl pointer-events-none z-0" />
 
-          <div className="flex items-center gap-4 sm:gap-6">
-            <div className="hidden sm:flex items-center gap-2">
-              <div className="w-8 h-8 rounded-full bg-zinc-100 border border-zinc-200 flex items-center justify-center font-bold text-xs text-zinc-900">
-                {(user?.full_name || user?.email || 'U').charAt(0).toUpperCase()}
-              </div>
-              <span className="text-xs sm:text-sm font-semibold text-zinc-800">
-                {user?.full_name || user?.email}
-              </span>
-            </div>
+      <Navbar onNavigate={onNavigate} currentView="dashboard" />
 
-            <button
-              type="button"
-              onClick={handleLogout}
-              className="inline-flex items-center gap-1.5 text-xs sm:text-sm font-semibold text-zinc-500 hover:text-black transition-colors cursor-pointer"
-            >
-              <LogOut className="w-4 h-4" />
-              <span className="hidden sm:inline">Sign Out</span>
-            </button>
-          </div>
-        </div>
-      </header>
-
-      <main className="flex-1 w-full max-w-[1536px] mx-auto px-4 sm:px-8 lg:px-12 py-8 sm:py-12">
+      <main className="flex-1 w-full max-w-[1536px] mx-auto px-4 sm:px-8 lg:px-12 py-8 sm:py-12 relative z-10">
         <div className="flex flex-col items-center justify-center text-center mb-10">
-          <div className="inline-flex flex-col items-center group cursor-pointer select-none">
-            <h1 className="text-4xl sm:text-5xl font-black italic tracking-tight bg-gradient-to-r from-[#FF4055] to-[#FF8A1C] bg-clip-text text-transparent pb-1">
-              Engineering Workspaces
+          <div className="inline-flex flex-col items-center select-none">
+            <span
+              className={`text-[11px] sm:text-sm font-bold uppercase tracking-widest mb-2 flex items-center gap-2 ${
+                isDark ? 'text-[#FFC900]' : 'text-[#D9A300]'
+              }`}
+            >
+              <span>MANAGEMENT</span>
+              <span>•</span>
+              <span>WORKSPACE</span>
+              <span>•</span>
+              <span>PIPELINE</span>
+            </span>
+            <h1
+              className={`text-3xl sm:text-4xl md:text-5xl font-black tracking-tight ${
+                isDark ? 'text-[#F5F3EF]' : 'text-[#171717]'
+              }`}
+            >
+              Engineering{' '}
+              <span className={isDark ? 'text-[#FFC900]' : 'text-[#D9A300]'}>
+                Workspaces
+              </span>
+              .
             </h1>
-            <span className="w-36 h-[3.5px] sm:h-[4px] rounded-full bg-gradient-to-r from-[#FF4055] to-[#FF8A1C] mt-1 group-hover:w-full transition-all duration-300" />
+            <span
+              className={`w-28 sm:w-36 h-[3px] rounded-full mt-2 ${
+                isDark ? 'bg-[#FFC900]' : 'bg-[#D9A300]'
+              }`}
+            />
           </div>
-          <p className="text-xs sm:text-sm text-zinc-500 font-medium mt-3.5">
+          <p
+            className={`text-xs sm:text-base font-medium mt-3.5 ${
+              isDark ? 'text-[#A6A4A0]' : 'text-[#6B665E]'
+            }`}
+          >
             Showing {projects.length} active software workspaces & execution roadmaps
           </p>
 
           <div className="flex flex-wrap items-center justify-center gap-3 mt-6">
-            <div className="inline-flex items-center p-1 bg-white border border-zinc-200/90 rounded-2xl shadow-2xs">
+            <div
+              className={`inline-flex items-center p-1.5 rounded-full border shadow-xs ${
+                isDark
+                  ? 'bg-[#18191D]/90 border-[#343330] backdrop-blur-md'
+                  : 'bg-[#FFFFFF]/90 border-[#E8E1D5] backdrop-blur-md'
+              }`}
+            >
               {(['All', 'Planning', 'In Progress', 'Completed'] as const).map((filter) => {
                 const isActive = statusFilter === filter;
                 return (
@@ -437,10 +466,14 @@ export function DashboardView({ onNavigate }: DashboardViewProps) {
                     key={filter}
                     type="button"
                     onClick={() => setStatusFilter(filter)}
-                    className={`px-4 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                    className={`px-4 py-1.5 rounded-full text-sm font-semibold transition-all cursor-pointer ${
                       isActive
-                        ? 'bg-black text-white shadow-xs'
-                        : 'text-zinc-600 hover:text-black'
+                        ? isDark
+                          ? 'bg-[#FFC900] text-[#08090B] shadow-sm shadow-[#FFC900]/20'
+                          : 'bg-[#D9A300] text-white shadow-sm'
+                        : isDark
+                        ? 'text-[#A6A4A0] hover:text-[#F5F3EF]'
+                        : 'text-[#6B665E] hover:text-[#171717]'
                     }`}
                   >
                     {filter}
@@ -452,7 +485,11 @@ export function DashboardView({ onNavigate }: DashboardViewProps) {
             <button
               type="button"
               onClick={openCreateModal}
-              className="inline-flex items-center gap-2 px-5 py-2.5 rounded-2xl bg-black text-white text-xs font-bold hover:bg-zinc-800 transition-all cursor-pointer shadow-xs"
+              className={`inline-flex items-center gap-2 px-5 py-2.5 rounded-full text-sm font-semibold transition-all cursor-pointer shadow-md ${
+                isDark
+                  ? 'bg-gradient-to-r from-[#FFC900] to-[#E5A800] text-[#08090B] hover:brightness-110 hover:shadow-[0_0_20px_rgba(255,201,0,0.35)]'
+                  : 'bg-gradient-to-r from-[#D9A300] to-[#B88700] text-white hover:brightness-105'
+              }`}
             >
               <Plus className="w-3.5 h-3.5 stroke-[3]" />
               <span>New Project</span>
@@ -461,7 +498,13 @@ export function DashboardView({ onNavigate }: DashboardViewProps) {
         </div>
 
         {error && (
-          <div className="p-4 rounded-2xl bg-red-50 border border-red-200 text-red-700 text-xs sm:text-sm flex items-center justify-between mb-6">
+          <div
+            className={`p-4 rounded-2xl border text-xs sm:text-sm flex items-center justify-between mb-6 ${
+              isDark
+                ? 'bg-rose-950/20 border-rose-900/40 text-rose-300'
+                : 'bg-red-50 border-red-200 text-red-700'
+            }`}
+          >
             <div className="flex items-center gap-2">
               <AlertCircle className="w-4 h-4 shrink-0 text-red-500" />
               <span>{error}</span>
@@ -469,7 +512,7 @@ export function DashboardView({ onNavigate }: DashboardViewProps) {
             <button
               type="button"
               onClick={fetchProjects}
-              className="text-xs font-bold underline hover:text-red-900 cursor-pointer"
+              className="text-xs font-bold underline hover:opacity-80 cursor-pointer"
             >
               Retry
             </button>
@@ -478,18 +521,50 @@ export function DashboardView({ onNavigate }: DashboardViewProps) {
 
         {isLoading ? (
           <div className="p-16 text-center flex flex-col items-center justify-center">
-            <div className="w-8 h-8 rounded-full border-2 border-zinc-300 border-t-black animate-spin mb-4" />
-            <p className="text-xs text-zinc-500 font-medium">Loading your projects...</p>
+            <div
+              className={`w-8 h-8 rounded-full border-2 animate-spin mb-4 ${
+                isDark
+                  ? 'border-[#242321] border-t-[#FFC900]'
+                  : 'border-[#E8E1D5] border-t-[#D9A300]'
+              }`}
+            />
+            <p
+              className={`text-xs font-medium ${
+                isDark ? 'text-[#A6A4A0]' : 'text-[#6B665E]'
+              }`}
+            >
+              Loading your projects...
+            </p>
           </div>
         ) : filteredProjects.length === 0 ? (
-          <div className="rounded-3xl border border-dashed border-zinc-300 bg-white p-12 sm:p-16 text-center flex flex-col items-center justify-center">
-            <div className="w-16 h-16 rounded-3xl bg-zinc-50 border border-zinc-200 text-zinc-900 flex items-center justify-center mb-4">
-              <FolderGit2 className="w-8 h-8 text-[#FF4055]" />
+          <div
+            className={`rounded-3xl border border-dashed p-12 sm:p-16 text-center flex flex-col items-center justify-center ${
+              isDark
+                ? 'border-[#242321] bg-[#18191D]'
+                : 'border-[#E8E1D5] bg-[#FFFFFF]'
+            }`}
+          >
+            <div
+              className={`w-16 h-16 rounded-3xl border flex items-center justify-center mb-4 ${
+                isDark
+                  ? 'bg-[#08090B] border-[#242321] text-[#FFC900]'
+                  : 'bg-[#F7F3EA] border-[#E8E1D5] text-[#D9A300]'
+              }`}
+            >
+              <FolderGit2 className="w-8 h-8" />
             </div>
-            <h3 className="text-lg font-bold text-zinc-950 mb-1">
+            <h3
+              className={`text-lg font-bold mb-1 ${
+                isDark ? 'text-[#F5F3EF]' : 'text-[#171717]'
+              }`}
+            >
               {statusFilter === 'All' ? 'No projects yet' : `No ${statusFilter} projects`}
             </h3>
-            <p className="text-xs sm:text-sm text-zinc-500 max-w-sm mb-6 leading-relaxed">
+            <p
+              className={`text-xs sm:text-sm font-semibold max-w-sm mb-8 leading-relaxed ${
+                isDark ? 'text-[#A6A4A0]' : 'text-[#6B665E]'
+              }`}
+            >
               {statusFilter === 'All'
                 ? 'Create your first software project to generate an AI architecture roadmap and whiteboard flowchart.'
                 : `You do not have any projects currently in "${statusFilter}" state.`}
@@ -498,7 +573,11 @@ export function DashboardView({ onNavigate }: DashboardViewProps) {
               <button
                 type="button"
                 onClick={openCreateModal}
-                className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-black text-white text-xs sm:text-sm font-semibold hover:bg-zinc-800 transition-colors shadow-sm cursor-pointer"
+                className={`inline-flex items-center gap-2 px-5 py-2.5 rounded-xl text-xs sm:text-sm font-semibold transition-all shadow-sm cursor-pointer ${
+                  isDark
+                    ? 'bg-[#FFC900] text-[#08090B] hover:brightness-110'
+                    : 'bg-[#D9A300] text-white hover:brightness-105'
+                }`}
               >
                 <Plus className="w-4 h-4" />
                 <span>Create Project</span>
@@ -544,72 +623,188 @@ export function DashboardView({ onNavigate }: DashboardViewProps) {
       />
 
       {modalMode === 'details' && selectedProject && (
-        <div className="fixed inset-0 z-50 bg-white flex flex-col overflow-hidden animate-in fade-in duration-200">
-          <header className="h-20 shrink-0 border-b border-zinc-200 bg-white px-6 sm:px-12 flex items-center justify-between">
-            <div className="flex items-center gap-4">
-              <div className="w-10 h-10 rounded-2xl bg-zinc-50 border border-zinc-200 flex items-center justify-center text-zinc-900 shrink-0">
-                <FolderGit2 className="w-5 h-5 text-[#FF4055]" />
+        <div
+          className={`fixed inset-0 z-50 flex flex-col overflow-hidden animate-in fade-in duration-200 ${
+            isDark ? 'bg-[#08090B] text-[#F5F3EF]' : 'bg-[#F7F3EA] text-[#171717]'
+          }`}
+        >
+          <header
+            className={`h-16 sm:h-18 shrink-0 border-b px-5 sm:px-8 flex items-center justify-between font-['Plus_Jakarta_Sans',sans-serif] ${
+              isDark
+                ? 'bg-[#08090B] border-[#242321]'
+                : 'bg-[#FFFFFF] border-[#E8E1D5]'
+            }`}
+          >
+            <div className="flex items-center gap-3 min-w-0">
+              <div
+                className={`w-8 h-8 rounded-lg border flex items-center justify-center shrink-0 ${
+                  isDark
+                    ? 'bg-[#18191D] border-[#242321] text-[#FFC900]'
+                    : 'bg-[#F7F3EA] border-[#E8E1D5] text-[#D9A300]'
+                }`}
+              >
+                <FolderGit2 className="w-4 h-4" />
               </div>
-              <div>
-                <div className="flex items-center gap-3">
-                  <h2 className="text-xl font-extrabold text-zinc-950 tracking-tight line-clamp-1">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2.5">
+                  <h2
+                    className={`text-base sm:text-lg font-bold tracking-tight truncate ${
+                      isDark ? 'text-[#F5F3EF]' : 'text-[#171717]'
+                    }`}
+                  >
                     {selectedProject.name}
                   </h2>
                   {renderStatusBadge(selectedProject.status)}
                 </div>
-                <p className="text-xs text-zinc-500 font-medium">
+                <p
+                  className={`text-xs mt-0.5 truncate font-normal ${
+                    isDark ? 'text-[#A6A4A0]' : 'text-[#6B665E]'
+                  }`}
+                >
                   Software workspace, architecture roadmap, and execution specifications
                 </p>
               </div>
             </div>
 
-            <div className="flex items-center gap-3">
-              <div className="inline-flex p-1 bg-zinc-100 rounded-xl">
+            <div className="flex items-center gap-2 sm:gap-3 shrink-0">
+              <div
+                className={`inline-flex p-0.5 rounded-xl border ${
+                  isDark
+                    ? 'bg-[#18191D] border-[#242321]'
+                    : 'bg-[#F7F3EA] border-[#E8E1D5]'
+                }`}
+              >
                 <button
                   type="button"
                   onClick={() => setDetailsTab('roadmap')}
-                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold tracking-tight transition-all cursor-pointer ${
                     detailsTab === 'roadmap'
-                      ? 'bg-white text-black shadow-xs'
-                      : 'text-zinc-600 hover:text-black'
+                      ? isDark
+                        ? 'bg-[#FFC900] text-[#08090B]'
+                        : 'bg-[#D9A300] text-white'
+                      : isDark
+                      ? 'text-[#A6A4A0] hover:text-[#F5F3EF]'
+                      : 'text-[#6B665E] hover:text-[#171717]'
                   }`}
                 >
-                  <Sparkles className="w-3.5 h-3.5 text-[#FF4055]" />
+                  <Sparkles
+                    className={`w-3.5 h-3.5 ${
+                      detailsTab === 'roadmap'
+                        ? isDark
+                          ? 'text-[#08090B]'
+                          : 'text-white'
+                        : isDark
+                        ? 'text-[#FFC900]'
+                        : 'text-[#D9A300]'
+                    }`}
+                  />
                   <span>AI Roadmap</span>
                 </button>
                 <button
                   type="button"
                   onClick={() => setDetailsTab('whiteboard')}
-                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold tracking-tight transition-all cursor-pointer ${
                     detailsTab === 'whiteboard'
-                      ? 'bg-white text-black shadow-xs'
-                      : 'text-zinc-600 hover:text-black'
+                      ? isDark
+                        ? 'bg-[#FFC900] text-[#08090B]'
+                        : 'bg-[#D9A300] text-white'
+                      : isDark
+                      ? 'text-[#A6A4A0] hover:text-[#F5F3EF]'
+                      : 'text-[#6B665E] hover:text-[#171717]'
                   }`}
                 >
-                  <Workflow className="w-3.5 h-3.5 text-[#FF4055]" />
+                  <Workflow
+                    className={`w-3.5 h-3.5 ${
+                      detailsTab === 'whiteboard'
+                        ? isDark
+                          ? 'text-[#08090B]'
+                          : 'text-white'
+                        : isDark
+                        ? 'text-[#FFC900]'
+                        : 'text-[#D9A300]'
+                    }`}
+                  />
                   <span>Whiteboard</span>
                 </button>
                 <button
                   type="button"
-                  onClick={() => setDetailsTab('specs')}
-                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
-                    detailsTab === 'specs'
-                      ? 'bg-white text-black shadow-xs'
-                      : 'text-zinc-600 hover:text-black'
+                  onClick={() => setDetailsTab('database')}
+                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold tracking-tight transition-all cursor-pointer ${
+                    detailsTab === 'database'
+                      ? isDark
+                        ? 'bg-[#FFC900] text-[#08090B]'
+                        : 'bg-[#D9A300] text-white'
+                      : isDark
+                      ? 'text-[#A6A4A0] hover:text-[#F5F3EF]'
+                      : 'text-[#6B665E] hover:text-[#171717]'
                   }`}
                 >
-                  <Layers className="w-3.5 h-3.5 text-zinc-500" />
+                  <Database
+                    className={`w-3.5 h-3.5 ${
+                      detailsTab === 'database'
+                        ? isDark
+                          ? 'text-[#08090B]'
+                          : 'text-white'
+                        : isDark
+                        ? 'text-[#FFC900]'
+                        : 'text-[#D9A300]'
+                    }`}
+                  />
+                  <span>Database Schema</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setDetailsTab('specs')}
+                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold tracking-tight transition-all cursor-pointer ${
+                    detailsTab === 'specs'
+                      ? isDark
+                        ? 'bg-[#FFC900] text-[#08090B]'
+                        : 'bg-[#D9A300] text-white'
+                      : isDark
+                      ? 'text-[#A6A4A0] hover:text-[#F5F3EF]'
+                      : 'text-[#6B665E] hover:text-[#171717]'
+                  }`}
+                >
+                  <Layers className="w-3.5 h-3.5" />
                   <span>Project Specs</span>
                 </button>
               </div>
 
-              {(detailsTab === 'roadmap' || detailsTab === 'whiteboard') && roadmap && !isGeneratingRoadmap && (
+              {detailsTab === 'database' ? (
+                <button
+                  type="button"
+                  onClick={() => dbRegenerateRef.current?.()}
+                  disabled={isDatabaseGenerating}
+                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-semibold tracking-tight transition-all cursor-pointer disabled:opacity-50 ${
+                    isDark
+                      ? 'border-[#242321] bg-[#18191D] text-[#F5F3EF] hover:border-[#FFC900]/50'
+                      : 'border-[#E8E1D5] bg-[#FFFFFF] text-[#171717] hover:border-[#D9A300]/50'
+                  }`}
+                >
+                  <RotateCcw
+                    className={`w-3.5 h-3.5 ${
+                      isDatabaseGenerating
+                        ? 'animate-spin text-[#FFC900]'
+                        : isDark
+                        ? 'text-[#FFC900]'
+                        : 'text-[#D9A300]'
+                    }`}
+                  />
+                  <span className="hidden sm:inline">
+                    {isDatabaseGenerating ? 'Architecting...' : 'Regenerate'}
+                  </span>
+                </button>
+              ) : (detailsTab === 'roadmap' || detailsTab === 'whiteboard') && roadmap && !isGeneratingRoadmap && (
                 <button
                   type="button"
                   onClick={() => setConfirmRegenerateOpen(true)}
-                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl border border-zinc-200 bg-white text-xs font-semibold text-zinc-700 hover:text-black hover:bg-zinc-50 transition-all cursor-pointer shadow-2xs"
+                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-semibold tracking-tight transition-all cursor-pointer ${
+                    isDark
+                      ? 'border-[#242321] bg-[#18191D] text-[#F5F3EF] hover:border-[#FFC900]/50'
+                      : 'border-[#E8E1D5] bg-[#FFFFFF] text-[#171717] hover:border-[#D9A300]/50'
+                  }`}
                 >
-                  <RotateCcw className="w-3.5 h-3.5 text-[#FF4055]" />
+                  <RotateCcw className={`w-3.5 h-3.5 ${isDark ? 'text-[#FFC900]' : 'text-[#D9A300]'}`} />
                   <span className="hidden sm:inline">Regenerate</span>
                 </button>
               )}
@@ -617,9 +812,13 @@ export function DashboardView({ onNavigate }: DashboardViewProps) {
               <button
                 type="button"
                 onClick={closeModal}
-                className="p-2.5 rounded-xl border border-zinc-200 text-zinc-500 hover:text-black hover:bg-zinc-100 transition-colors cursor-pointer flex items-center gap-1.5 text-xs font-semibold"
+                className={`px-3 py-1.5 rounded-lg border transition-colors cursor-pointer flex items-center gap-1.5 text-xs font-semibold tracking-tight ${
+                  isDark
+                    ? 'border-[#242321] text-[#A6A4A0] hover:text-[#F5F3EF] hover:border-[#FFC900]/50 bg-[#18191D]'
+                    : 'border-[#E8E1D5] text-[#6B665E] hover:text-[#171717] hover:border-[#D9A300]/50 bg-white'
+                }`}
               >
-                <X className="w-4 h-4" />
+                <X className="w-3.5 h-3.5" />
                 <span className="hidden sm:inline">Close</span>
               </button>
             </div>
@@ -627,9 +826,9 @@ export function DashboardView({ onNavigate }: DashboardViewProps) {
 
           <div
             className={`flex-1 ${
-              detailsTab === 'whiteboard'
-                ? 'w-full h-full flex flex-col overflow-hidden bg-white'
-                : 'overflow-y-auto px-6 sm:px-12 py-8 bg-zinc-50/40'
+              detailsTab === 'whiteboard' || detailsTab === 'database'
+                ? `w-full h-full flex flex-col overflow-hidden ${isDark ? 'bg-[#08090B]' : 'bg-[#FFFFFF]'}`
+                : `overflow-y-auto no-scrollbar px-6 sm:px-12 py-8 ${isDark ? 'bg-[#08090B]' : 'bg-[#F7F3EA]'}`
             }`}
           >
             {detailsTab === 'roadmap' ? (
@@ -654,12 +853,34 @@ export function DashboardView({ onNavigate }: DashboardViewProps) {
                 {roadmap ? (
                   <RoadmapWhiteboard projectId={selectedProject.id} roadmap={roadmap} />
                 ) : (
-                  <div className="rounded-3xl border border-dashed border-zinc-300 bg-white p-12 text-center flex flex-col items-center justify-center my-auto mx-auto max-w-md shadow-2xs">
-                    <div className="w-14 h-14 rounded-2xl bg-zinc-50 border border-zinc-200 text-zinc-900 flex items-center justify-center mb-5">
-                      <Workflow className="w-6 h-6 text-[#FF4055]" />
+                  <div
+                    className={`rounded-3xl border border-dashed p-12 text-center flex flex-col items-center justify-center my-auto mx-auto max-w-md shadow-xs ${
+                      isDark
+                        ? 'border-[#242321] bg-[#18191D]'
+                        : 'border-[#E8E1D5] bg-[#FFFFFF]'
+                    }`}
+                  >
+                    <div
+                      className={`w-14 h-14 rounded-2xl border flex items-center justify-center mb-5 ${
+                        isDark
+                          ? 'bg-[#08090B] border-[#242321] text-[#FFC900]'
+                          : 'bg-[#F7F3EA] border-[#E8E1D5] text-[#D9A300]'
+                      }`}
+                    >
+                      <Workflow className="w-6 h-6" />
                     </div>
-                    <h4 className="text-lg font-bold text-zinc-950 mb-1.5">No Roadmap Generated Yet</h4>
-                    <p className="text-xs text-zinc-500 leading-relaxed mb-6">
+                    <h4
+                      className={`text-lg font-bold mb-1.5 ${
+                        isDark ? 'text-[#F5F3EF]' : 'text-[#171717]'
+                      }`}
+                    >
+                      No Roadmap Generated Yet
+                    </h4>
+                    <p
+                      className={`text-xs leading-relaxed mb-6 ${
+                        isDark ? 'text-[#A6A4A0]' : 'text-[#6B665E]'
+                      }`}
+                    >
                       Generate an AI roadmap first to view, edit, and reorganize the interactive
                       visual flowchart whiteboard.
                     </p>
@@ -669,14 +890,26 @@ export function DashboardView({ onNavigate }: DashboardViewProps) {
                         setDetailsTab('roadmap');
                         handleGenerateRoadmap(selectedProject.id);
                       }}
-                      className="inline-flex items-center gap-2 px-6 py-3 rounded-xl bg-black text-white text-xs font-bold hover:bg-zinc-800 transition-all shadow-md cursor-pointer"
+                      className={`inline-flex items-center gap-2 px-6 py-3 rounded-xl text-sm font-semibold transition-all shadow-md cursor-pointer ${
+                        isDark
+                          ? 'bg-[#FFC900] text-[#08090B] hover:brightness-110'
+                          : 'bg-[#D9A300] text-white hover:brightness-105'
+                      }`}
                     >
-                      <Sparkles className="w-4 h-4 text-[#FF4055]" />
+                      <Sparkles className="w-4 h-4" />
                       <span>Generate Roadmap</span>
                     </button>
                   </div>
                 )}
               </div>
+            ) : detailsTab === 'database' ? (
+              <DatabaseSchemaCanvas
+                project={selectedProject}
+                onRegisterRegenerate={(fn) => {
+                  dbRegenerateRef.current = fn;
+                }}
+                onGeneratingChange={setIsDatabaseGenerating}
+              />
             ) : (
               <ProjectSpecsView
                 project={selectedProject}
