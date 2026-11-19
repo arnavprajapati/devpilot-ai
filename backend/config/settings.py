@@ -10,7 +10,7 @@ SECRET_KEY = 'django-insecure-g%tjgin@aeyg!iu+@n9t(4%ok0xntkb0puho^+i3=0t@mj0&dz
 
 DEBUG = True
 
-ALLOWED_HOSTS = ['localhost', '127.0.0.1', '[::1]']
+ALLOWED_HOSTS = ['*']
 
 INSTALLED_APPS = [
     'django.contrib.admin',
@@ -118,4 +118,6 @@ REST_FRAMEWORK = {
 
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '')
 GEMINI_MODEL = os.environ.get('GEMINI_MODEL', 'gemini-3.6-flash')
+GROQ_API_KEY = os.environ.get('GROQ_API_KEY', '') or os.environ.get('GEMINI_API_KEY', '')
+GROQ_MODEL = os.environ.get('GROQ_MODEL', 'qwen/qwen3.8-27b')
 
