@@ -2,6 +2,7 @@ from django.contrib.auth import login, logout
 from django.middleware.csrf import get_token
 from django.views.decorators.csrf import ensure_csrf_cookie
 from rest_framework import status
+from rest_framework.authtoken.models import Token
 from rest_framework.decorators import api_view, authentication_classes, permission_classes
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
@@ -28,10 +29,12 @@ def register_view(request):
     if serializer.is_valid():
         user = serializer.save()
         login(request._request, user)
+        token, _ = Token.objects.get_or_create(user=user)
         return Response(
             {
                 'message': 'Registration successful.',
                 'user': UserSerializer(user).data,
+                'token': token.key,
             },
             status=status.HTTP_201_CREATED,
         )
@@ -46,10 +49,12 @@ def login_view(request):
     if serializer.is_valid():
         user = serializer.validated_data['user']
         login(request._request, user)
+        token, _ = Token.objects.get_or_create(user=user)
         return Response(
             {
                 'message': 'Login successful.',
                 'user': UserSerializer(user).data,
+                'token': token.key,
             },
             status=status.HTTP_200_OK,
         )
@@ -57,9 +62,10 @@ def login_view(request):
 
 
 @api_view(['POST'])
-@authentication_classes([])
 @permission_classes([AllowAny])
 def logout_view(request):
+    if hasattr(request, 'user') and request.user.is_authenticated:
+        Token.objects.filter(user=request.user).delete()
     logout(request._request)
     return Response({'message': 'Logged out successfully.'}, status=status.HTTP_200_OK)
 

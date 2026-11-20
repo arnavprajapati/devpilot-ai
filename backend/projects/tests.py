@@ -35,7 +35,7 @@ class ProjectAPITests(APITestCase):
 
     def test_unauthenticated_access_rejected(self):
         response = self.client.get(self.list_url)
-        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertIn(response.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
 
     def test_tech_stacks_endpoint(self):
         self.client.force_authenticate(user=self.user1)

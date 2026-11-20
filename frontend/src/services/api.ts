@@ -36,6 +36,11 @@ export async function apiRequest<T = any>(
     ...(options.headers as Record<string, string>),
   };
 
+  const authToken = typeof window !== 'undefined' ? localStorage.getItem('auth_token') : null;
+  if (authToken) {
+    headers['Authorization'] = `Token ${authToken}`;
+  }
+
   if (csrfToken && options.method && options.method !== 'GET') {
     headers['X-CSRFToken'] = csrfToken;
   }

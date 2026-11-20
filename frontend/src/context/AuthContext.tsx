@@ -41,6 +41,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     } else {
       setUser(null);
       setIsAuthenticated(false);
+      localStorage.removeItem('auth_token');
     }
     setIsLoading(false);
   };
@@ -50,12 +51,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const login = async (email: string, password: string) => {
-    const res = await apiRequest<{ message: string; user: User }>('/api/auth/login/', {
+    const res = await apiRequest<{ message: string; user: User; token?: string }>('/api/auth/login/', {
       method: 'POST',
       body: JSON.stringify({ email, password }),
     });
 
     if (res.data?.user) {
+      if (res.data.token) {
+        localStorage.setItem('auth_token', res.data.token);
+      }
       setUser(res.data.user);
       setIsAuthenticated(true);
       return { success: true };
@@ -83,7 +87,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     password: string,
     confirmPassword: string
   ) => {
-    const res = await apiRequest<{ message: string; user: User }>('/api/auth/register/', {
+    const res = await apiRequest<{ message: string; user: User; token?: string }>('/api/auth/register/', {
       method: 'POST',
       body: JSON.stringify({
         full_name: fullName,
@@ -94,6 +98,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     });
 
     if (res.data?.user) {
+      if (res.data.token) {
+        localStorage.setItem('auth_token', res.data.token);
+      }
       setUser(res.data.user);
       setIsAuthenticated(true);
       return { success: true };
@@ -115,6 +122,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const logout = async () => {
     await apiRequest('/api/auth/logout/', { method: 'POST' });
+    localStorage.removeItem('auth_token');
     setUser(null);
     setIsAuthenticated(false);
   };
