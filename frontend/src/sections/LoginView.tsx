@@ -73,8 +73,8 @@ export function LoginView({ onNavigate }: LoginViewProps) {
         </button>
       </div>
 
-      <div className="w-full max-w-md text-center mb-4">
-        <div className="flex justify-center mb-3">
+      <div className="w-full max-w-[390px] text-center mb-7">
+        <div className="flex justify-center mb-3.5">
           <div onClick={() => onNavigate('landing')} className="cursor-pointer">
             <Logo size="md" theme={theme} />
           </div>
@@ -86,16 +86,9 @@ export function LoginView({ onNavigate }: LoginViewProps) {
         >
           Welcome Back
         </h2>
-        <p
-          className={`text-xs mt-1 ${
-            isDark ? 'text-[#A6A4A0]' : 'text-[#6B665E]'
-          }`}
-        >
-          Log in to manage your development roadmaps and workspaces.
-        </p>
       </div>
 
-      <div className="w-full max-w-md">
+      <div className="w-full max-w-[390px]">
         <div
           className={`py-6 px-6 sm:px-8 border rounded-2xl transition-colors ${
             isDark

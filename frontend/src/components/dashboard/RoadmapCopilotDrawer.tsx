@@ -507,7 +507,7 @@ export function RoadmapCopilotDrawer({
             <button
               onClick={handleResetChat}
               title="Reset conversation"
-              className={`p-2 rounded-lg transition-colors ${
+              className={`p-2 rounded-lg cursor-pointer transition-colors ${
                 isDark ? 'hover:bg-white/10 text-gray-400' : 'hover:bg-black/5 text-gray-600'
               }`}
             >
@@ -516,7 +516,7 @@ export function RoadmapCopilotDrawer({
             <button
               onClick={onClose}
               title="Close Copilot"
-              className={`p-2 rounded-lg transition-colors ${
+              className={`p-2 rounded-lg  cursor-pointer transition-colors ${
                 isDark ? 'hover:bg-white/10 text-gray-400 hover:text-white' : 'hover:bg-black/5 text-gray-600'
               }`}
             >
@@ -835,7 +835,7 @@ export function RoadmapCopilotDrawer({
             <button
               type="submit"
               disabled={!inputText.trim() || isLoading}
-              className="px-4 py-3 rounded-xl bg-[#FFC900] hover:bg-[#E5B500] text-black font-bold flex items-center justify-center transition-all disabled:opacity-40 disabled:hover:bg-[#FFC900] active:scale-95"
+              className="px-4 py-3 cursor-pointer rounded-xl bg-[#FFC900] hover:bg-[#E5B500] text-black font-bold flex items-center justify-center transition-all disabled:opacity-40 disabled:hover:bg-[#FFC900] active:scale-95"
             >
               {isLoading ? (
                 <Loader2 className="w-5 h-5 animate-spin" />

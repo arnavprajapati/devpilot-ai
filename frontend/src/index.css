@@ -87,3 +87,15 @@ html:not(.dark) ::-webkit-scrollbar-thumb:hover {
 .border-devpilot-gradient {
   border-image: linear-gradient(90deg, #FF4055 0%, #FF8A1C 100%) 1;
 }
+
+@keyframes indeterminate {
+  0% {
+    transform: translateX(-100%);
+  }
+  50% {
+    transform: translateX(110%);
+  }
+  100% {
+    transform: translateX(250%);
+  }
+}

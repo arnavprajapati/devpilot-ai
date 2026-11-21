@@ -191,38 +191,66 @@ export function ProjectRoadmapView({
         </div>
       ) : isGenerating ? (
         <div
-          className={`border p-14 text-center flex flex-col items-center justify-center min-h-[400px] ${isDark ? 'border-[#242321] bg-[#111215]' : 'border-[#E8E1D5] bg-white'
-            }`}
+          className={`border p-14 text-center flex flex-col items-center justify-center min-h-[400px] ${
+            isDark ? 'border-[#242321] bg-[#111215]' : 'border-[#E8E1D5] bg-white'
+          }`}
         >
           <div className="relative mb-6">
             <div
-              className={`w-12 h-12 border-2 animate-spin ${isDark
-                ? 'border-[#242321] border-t-[#FFC900]'
-                : 'border-[#E8E1D5] border-t-[#D9A300]'
-                }`}
+              className={`w-14 h-14 rounded-full border-2 animate-spin ${
+                isDark
+                  ? 'border-[#242321] border-t-[#FFC900] border-r-[#FFC900]/40'
+                  : 'border-[#E8E1D5] border-t-[#D9A300] border-r-[#D9A300]/40'
+              }`}
             />
+            <div className="absolute inset-0 flex items-center justify-center">
+              <Sparkles
+                className={`w-5 h-5 animate-pulse ${
+                  isDark ? 'text-[#FFC900]' : 'text-[#D9A300]'
+                }`}
+              />
+            </div>
           </div>
           <h4
-            className={`text-xl font-semibold mb-2 tracking-tight ${isDark ? 'text-[#F5F3EF]' : 'text-[#171717]'
-              }`}
+            className={`text-xl font-semibold mb-2 tracking-tight ${
+              isDark ? 'text-[#F5F3EF]' : 'text-[#171717]'
+            }`}
           >
             Generating Your Roadmap
           </h4>
           <p
-            className={`text-sm font-normal max-w-xs leading-relaxed mb-5 ${isDark ? 'text-[#A6A4A0]' : 'text-[#6B665E]'
-              }`}
+            className={`text-xs font-medium max-w-xs leading-relaxed mb-6 ${
+              isDark ? 'text-[#A6A4A0]' : 'text-[#6B665E]'
+            }`}
           >
-            AI is analyzing your project and structuring phases, milestones, and tasks. Usually takes 10–15 seconds.
+            Structuring execution phases and milestones.
           </p>
-          <div
-            className={`w-48 h-1 overflow-hidden ${isDark ? 'bg-[#242321]' : 'bg-[#E8E1D5]'
-              }`}
-          >
+          <div className="w-64 max-w-xs space-y-2">
             <div
-              className={`h-full animate-[progress_2s_ease-in-out_infinite] ${isDark ? 'bg-[#FFC900]' : 'bg-[#D9A300]'
+              className={`h-1.5 w-full rounded-full overflow-hidden relative ${
+                isDark ? 'bg-[#242321]' : 'bg-[#E8E1D5]'
+              }`}
+            >
+              <div
+                className={`h-full rounded-full ${
+                  isDark
+                    ? 'bg-gradient-to-r from-[#FFC900]/60 via-[#FFC900] to-[#FFC900]/60 shadow-[0_0_12px_rgba(255,201,0,0.5)]'
+                    : 'bg-gradient-to-r from-[#D9A300]/60 via-[#D9A300] to-[#D9A300]/60 shadow-[0_0_12px_rgba(217,163,0,0.4)]'
                 }`}
-              style={{ width: '40%', animation: 'pulse 1.5s ease-in-out infinite' }}
-            />
+                style={{
+                  width: '45%',
+                  animation: 'indeterminate 1.8s ease-in-out infinite',
+                }}
+              />
+            </div>
+            <div className="flex justify-between items-center text-[11px] font-medium tracking-tight px-0.5">
+              <span className={isDark ? 'text-[#A6A4A0]' : 'text-[#6B665E]'}>
+                Architecting milestones...
+              </span>
+              <span className={isDark ? 'text-[#FFC900]' : 'text-[#D9A300]'}>
+                AI Engine
+              </span>
+            </div>
           </div>
         </div>
       ) : roadmap ? (
