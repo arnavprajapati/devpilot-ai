@@ -142,6 +142,8 @@ class ProjectRoadmapApplyPhaseActionView(APIView):
             return Response({'error': 'Roadmap does not exist.'}, status=status.HTTP_404_NOT_FOUND)
 
         action = request.data.get('action')
+        if action not in ['add_phase', 'edit_phase', 'reorder_phase', 'delete_phase']:
+            return Response({'error': f"Unsupported action: '{action}'."}, status=status.HTTP_400_BAD_REQUEST)
         phase_data = request.data.get('phase_data') or {}
         target_phase_id = request.data.get('target_phase_id')
         target_phase_order = request.data.get('target_phase_order')

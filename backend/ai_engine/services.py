@@ -5,7 +5,7 @@ from django.conf import settings
 from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import List, Optional, Literal
 
 
 class GeneratedTaskSchema(BaseModel):
@@ -25,7 +25,7 @@ class GeneratedPhaseSchema(BaseModel):
     title: str = Field(description="Phase title")
     description: str = Field(default="", description="One-sentence phase goal")
     duration: str = Field(default="2 Weeks", description="Duration e.g. Weeks 1-3")
-    order: int = Field(default=1)
+    order: Optional[int] = Field(default=None, description="Phase order e.g. 1, 2, 3")
     milestones: List[GeneratedMilestoneSchema] = Field(default_factory=list, description="Milestones per phase")
 
 
@@ -37,7 +37,7 @@ class GeneratedRoadmapSchema(BaseModel):
 
 class RoadmapCopilotResponse(BaseModel):
     explanation: str = Field(default="", description="Helpful, conversational explanation of architecture, use cases, and changes.")
-    action: str = Field(default="none", description="Action type: none, add_phase, edit_phase, delete_phase")
+    action: Literal["none", "add_phase", "edit_phase", "delete_phase"] = Field(default="none", description="Action type: none, add_phase, edit_phase, delete_phase")
     phase_data: Optional[GeneratedPhaseSchema] = Field(default=None, description="New or edited phase details when action is add_phase or edit_phase")
     target_phase_id: Optional[int] = Field(default=None, description="Database ID of target phase being edited or deleted")
     target_phase_order: Optional[int] = Field(default=None, description="Phase order/number of target phase being edited or deleted")
@@ -93,9 +93,7 @@ class GroqService:
     def get_api_key(cls):
         api_key = (
             getattr(settings, 'GROQ_API_KEY', '') or
-            getattr(settings, 'GEMINI_API_KEY', '') or
             os.environ.get('GROQ_API_KEY', '') or
-            os.environ.get('GEMINI_API_KEY', '') or
             ''
         )
         return api_key.strip()
@@ -134,14 +132,25 @@ class GroqService:
                 resp = requests.post(cls.API_URL, headers=headers, json=payload, timeout=timeout)
                 if resp.status_code == 200:
                     data = resp.json()
-                    content = data["choices"][0]["message"]["content"]
+                    if not isinstance(data, dict) or "choices" not in data or not data["choices"]:
+                        last_error = RuntimeError(f"Model {model_name} returned malformed response structure.")
+                        continue
+                    message = data["choices"][0].get("message", {})
+                    content = message.get("content", "")
+                    if not content or not content.strip():
+                        last_error = RuntimeError(f"Model {model_name} returned empty content.")
+                        continue
                     cleaned = content.strip()
                     for prefix in ("```json", "```"):
                         if cleaned.startswith(prefix):
                             cleaned = cleaned[len(prefix):]
                     if cleaned.endswith("```"):
                         cleaned = cleaned[:-3]
-                    return json.loads(cleaned.strip())
+                    parsed = json.loads(cleaned.strip())
+                    if not isinstance(parsed, dict) or not parsed:
+                        last_error = RuntimeError(f"Model {model_name} returned invalid or empty JSON.")
+                        continue
+                    return parsed
                 else:
                     last_error = RuntimeError(f"Groq API error ({resp.status_code}): {resp.text}")
             except Exception as exc:
@@ -490,10 +499,15 @@ class DatabaseSchemaService:
                 )
                 raw_json = GroqService.generate_json(system_instruction, prompt)
                 validated = GeneratedDBSchema.model_validate(raw_json)
-                data = validated.model_dump()
-                data['schema_type'] = schema_type
-                data['db_engine'] = db_engine
-                return data
+                gen_schema_type = str(validated.schema_type or '').strip().lower()
+                gen_db_engine = str(validated.db_engine or '').strip().lower()
+                if gen_schema_type != schema_type.lower() or gen_db_engine != db_engine.lower():
+                    raise ValueError(f"Generated schema targeted wrong engine: {validated.db_engine} ({validated.schema_type}), expected {db_engine} ({schema_type})")
+                if schema_type == 'table' and not (validated.sql_ddl or '').strip():
+                    raise ValueError("Generated relational schema is missing sql_ddl.")
+                if schema_type == 'document' and not (validated.nosql_code or '').strip():
+                    raise ValueError("Generated document schema is missing nosql_code.")
+                return validated.model_dump()
             except Exception:
                 pass
 
@@ -525,8 +539,17 @@ class DatabaseSchemaService:
                     last_error = RuntimeError(f"Model {model_name} returned empty response.")
                     continue
                 data = cls._parse_response(raw_text)
-                data['schema_type'] = schema_type
-                data['db_engine'] = db_engine
+                gen_schema_type = str(data.get('schema_type', '')).strip().lower()
+                gen_db_engine = str(data.get('db_engine', '')).strip().lower()
+                if gen_schema_type != schema_type.lower() or gen_db_engine != db_engine.lower():
+                    last_error = ValueError(f"Model {model_name} targeted wrong engine: {data.get('db_engine')} ({data.get('schema_type')}), expected {db_engine} ({schema_type})")
+                    continue
+                if schema_type == 'table' and not (data.get('sql_ddl') or '').strip():
+                    last_error = ValueError(f"Model {model_name} generated relational schema missing sql_ddl.")
+                    continue
+                if schema_type == 'document' and not (data.get('nosql_code') or '').strip():
+                    last_error = ValueError(f"Model {model_name} generated document schema missing nosql_code.")
+                    continue
                 return data
             except Exception as exc:
                 last_error = exc
@@ -536,6 +559,16 @@ class DatabaseSchemaService:
 
     @classmethod
     def build_layout(cls, schema_type, tables, db_engine):
+        seen_entity_names = set()
+        for idx, table in enumerate(tables):
+            name = (table.get('name') or '').strip()
+            if not name:
+                continue
+            name_lower = name.lower()
+            if name_lower in seen_entity_names:
+                raise ValueError(f"Duplicate entity name detected: '{name}'. Entity names must be unique.")
+            seen_entity_names.add(name_lower)
+
         nodes = []
         edges = []
         cols = 3 if len(tables) >= 5 else 2
@@ -574,7 +607,7 @@ class DatabaseSchemaService:
                     ref = col.get('references', '')
                     target_table_name = ref.split('.')[0].strip()
                     target_node_id = f"db-{target_table_name}"
-                    if target_table_name != source_table_name and any(t.get('name') == target_table_name for t in tables):
+                    if any(t.get('name') == target_table_name for t in tables):
                         edge_id = f"e-fk-{source_table_name}-{target_table_name}-{col.get('name')}"
                         edges.append({
                             "id": edge_id,
@@ -666,7 +699,8 @@ class RoadmapCopilotService:
             data['explanation'] = str(data['message'])
         elif 'explanation' not in data:
             data['explanation'] = 'Here is the requested roadmap architectural proposal.'
-        if 'action' not in data:
+        valid_actions = {'none', 'add_phase', 'edit_phase', 'delete_phase'}
+        if data.get('action') not in valid_actions:
             data['action'] = 'none'
 
         phase = data.get('phase_data')
@@ -674,6 +708,13 @@ class RoadmapCopilotService:
             if not phase.get('description'):
                 phase_title = phase.get('title', 'Development Phase')
                 phase['description'] = f"Comprehensive architecture and implementation for {phase_title}."
+            if 'order' in phase and phase['order'] is not None:
+                try:
+                    phase['order'] = int(phase['order'])
+                except (ValueError, TypeError):
+                    phase['order'] = None
+            else:
+                phase['order'] = None
             milestones = phase.get('milestones', [])
             for m_idx, m in enumerate(milestones, start=1):
                 if isinstance(m, dict):
@@ -730,6 +771,22 @@ class RoadmapCopilotService:
                 "milestones": m_list,
             })
 
+        active_phase = None
+        if active_phase_id:
+            active_phase = roadmap.phases.filter(id=active_phase_id).first()
+
+        active_phase_context = ""
+        if active_phase:
+            active_phase_context = (
+                f"\nCurrently Pinned / Active Phase in View:\n"
+                f"- Phase ID: {active_phase.id}\n"
+                f"- Phase Number (Order): {active_phase.order}\n"
+                f"- Phase Title: {active_phase.title}\n"
+                f"- Phase Description: {active_phase.description}\n"
+                f"- Phase Duration: {active_phase.duration}\n"
+                f"When the user refers to 'this phase', 'current phase', or asks to modify/add tasks to the active phase without naming one, focus on this pinned phase (target_phase_id={active_phase.id}, target_phase_order={active_phase.order}).\n"
+            )
+
         system_instruction = (
             f"You are the Principal Software Architect and Technical Lead Copilot for DevPilot.\n"
             f"Project: '{project.name}'\n"
@@ -740,7 +797,8 @@ class RoadmapCopilotService:
             f"Roadmap Title: {roadmap.title}\n"
             f"Summary: {roadmap.summary}\n"
             f"Active Phases ({len(phases_summary)} total):\n"
-            f"{json.dumps(phases_summary, indent=2)}\n\n"
+            f"{json.dumps(phases_summary, indent=2)}\n"
+            f"{active_phase_context}\n"
             f"Rules and capabilities:\n"
             f"1. Conversational explanation: In the 'explanation' field, provide an insightful, direct, and well-structured explanation in professional English. Structure your response using clear markdown headings (e.g. '### Overview', '### Key Objectives'), clean bullet points, and modern markdown tables when comparing tools or options. Wrap only key technical terms in double asterisks naturally; in tables, keep cell text clean and readable without excessive asterisks on every single word. Avoid solid walls of unformatted text.\n"
             f"2. Add Phase: If the user wants to add, insert, or create a new phase (e.g. payments, websockets, notifications, testing, ci/cd, deployment, auth), set action='add_phase'. Populate 'phase_data' with realistic duration, 2-3 key milestones, and 2-3 actionable tasks per milestone tailored to the tech stack.\n"

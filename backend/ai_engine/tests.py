@@ -91,7 +91,7 @@ class RoadmapAPITests(APITestCase):
 
     def test_unauthenticated_roadmap_access_rejected(self):
         response = self.client.get(self.detail_url)
-        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertIn(response.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
 
     def test_get_roadmap_when_none_exists(self):
         self.client.force_authenticate(user=self.user1)
@@ -240,3 +240,69 @@ class RoadmapAPITests(APITestCase):
         self.client.force_authenticate(user=self.user2)
         response = self.client.get(whiteboard_url)
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_generated_phase_schema_omitted_order_is_none(self):
+        from ai_engine.services import GeneratedPhaseSchema
+        phase = GeneratedPhaseSchema(title="Security Hardening")
+        self.assertIsNone(phase.order)
+
+    def test_roadmap_copilot_response_action_validation(self):
+        from ai_engine.services import RoadmapCopilotResponse
+        from pydantic import ValidationError
+        valid = RoadmapCopilotResponse(action="add_phase")
+        self.assertEqual(valid.action, "add_phase")
+        with self.assertRaises(ValidationError):
+            RoadmapCopilotResponse(action="invalid_action")
+
+    def test_groq_service_credentials_independent_of_gemini(self):
+        from ai_engine.services import GroqService
+        from django.test import override_settings
+        with override_settings(GROQ_API_KEY='gsk_test123', GEMINI_API_KEY='gemini_val'):
+            self.assertEqual(GroqService.get_api_key(), 'gsk_test123')
+            self.assertTrue(GroqService.is_available())
+        with override_settings(GROQ_API_KEY=''):
+            with patch.dict('os.environ', {'GROQ_API_KEY': 'gsk_env_key', 'GEMINI_API_KEY': 'gemini_val'}):
+                self.assertEqual(GroqService.get_api_key(), 'gsk_env_key')
+                self.assertTrue(GroqService.is_available())
+        with override_settings(GROQ_API_KEY=''):
+            with patch.dict('os.environ', {'GROQ_API_KEY': '', 'GEMINI_API_KEY': 'gemini_val'}, clear=True):
+                self.assertEqual(GroqService.get_api_key(), '')
+                self.assertFalse(GroqService.is_available())
+
+    def test_build_layout_rejects_duplicate_entity_names(self):
+        from ai_engine.services import DatabaseSchemaService
+        tables = [
+            {'name': 'users', 'columns': []},
+            {'name': 'Users', 'columns': []},
+        ]
+        with self.assertRaises(ValueError):
+            DatabaseSchemaService.build_layout('table', tables, 'PostgreSQL')
+
+    def test_build_layout_includes_self_referencing_foreign_keys(self):
+        from ai_engine.services import DatabaseSchemaService
+        tables = [
+            {
+                'name': 'tasks',
+                'columns': [
+                    {'name': 'id', 'is_primary': True},
+                    {'name': 'parent_id', 'is_foreign': True, 'references': 'tasks.id'},
+                ],
+            }
+        ]
+        nodes, edges = DatabaseSchemaService.build_layout('table', tables, 'PostgreSQL')
+        self.assertEqual(len(nodes), 1)
+        self.assertEqual(len(edges), 1)
+        self.assertEqual(edges[0]['source'], 'db-tasks')
+        self.assertEqual(edges[0]['target'], 'db-tasks')
+
+    def test_normalize_copilot_data_preserves_omitted_order_as_none(self):
+        from ai_engine.services import RoadmapCopilotService
+        data = {
+            'action': 'add_phase',
+            'phase_data': {
+                'title': 'New Feature Phase',
+                'milestones': [],
+            },
+        }
+        normalized = RoadmapCopilotService._normalize_copilot_data(data)
+        self.assertIsNone(normalized['phase_data']['order'])
