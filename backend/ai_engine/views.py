@@ -54,7 +54,7 @@ class ProjectRoadmapGenerateView(APIView):
             )
 
         phases_data = roadmap_data.get('phases', [])
-        if not phases_data or len(phases_data) < 3:
+        if not phases_data or len(phases_data) < 2:
             return Response(
                 {'error': 'Roadmap generation produced an incomplete or single-phase plan. Please try regenerating.'},
                 status=status.HTTP_502_BAD_GATEWAY
@@ -236,6 +236,7 @@ def _sync_milestones_and_tasks(phase, milestones_data):
 
 def _validate_and_sanitize_roadmap_consistency(roadmap):
     existing_phases = list(roadmap.phases.all().order_by('order'))
+    auto_pat = re.compile(r'\b(?:auto(?:matic(?:ally)?)?[- ]+(?:upgrade|purchase|billing|charge)|automatically[- ]+charge)\b', re.I)
     for idx, p in enumerate(existing_phases, start=1):
         if p.order != idx:
             p.order = idx
@@ -254,8 +255,17 @@ def _validate_and_sanitize_roadmap_consistency(roadmap):
                     t.delete()
                     continue
                 seen_task_titles.add(clean_title)
+                changed_t = False
+                if auto_pat.search(t.title):
+                    t.title = auto_pat.sub('prompt upgrade and plan selection', t.title)
+                    changed_t = True
+                if auto_pat.search(t.description):
+                    t.description = auto_pat.sub('prompt user with upgrade modal and plan selection options', t.description)
+                    changed_t = True
                 if t.order != active_task_idx:
                     t.order = active_task_idx
+                    changed_t = True
+                if changed_t:
                     t.save()
                 active_task_idx += 1
 
@@ -470,73 +480,6 @@ class ProjectRoadmapApplyPhaseActionView(APIView):
 
                     if is_full_stack_replacement and kept_phase_ids:
                         roadmap.phases.exclude(id__in=kept_phase_ids).delete()
-
-                all_affected_text = " ".join([
-                    f"{p.get('title', '')} {p.get('description', '')} " +
-                    " ".join([f"{m.get('title', '')} {m.get('description', '')} " +
-                              " ".join([f"{t.get('title', '')} {t.get('description', '')}" for t in m.get('tasks', [])])
-                              for m in p.get('milestones', [])])
-                    for p in affected_phases if isinstance(p, dict)
-                ])
-
-                old_tech, new_tech = RoadmapCopilotService._extract_technology_migration(
-                    prompt_text=all_affected_text,
-                    current_tech_stack=project.tech_stack,
-                    new_tech_stack=request.data.get('new_tech_stack', ''),
-                    change_summary=request.data.get('change_summary', '')
-                )
-                if old_tech and new_tech:
-                    old_tokens = [old_tech]
-                    cleaned_sub = re.sub(r'^(?:AWS|GCP|Azure)\s+', '', old_tech, flags=re.IGNORECASE).strip()
-                    if cleaned_sub and cleaned_sub.lower() != old_tech.lower() and len(cleaned_sub) >= 2:
-                        old_tokens.append(cleaned_sub)
-
-                    token_patterns = [re.compile(rf'\b{re.escape(tok)}\b', re.IGNORECASE) for tok in old_tokens]
-
-                    for p in roadmap.phases.all():
-                        changed_p = False
-                        for pat in token_patterns:
-                            if pat.search(p.title):
-                                p.title = pat.sub(new_tech, p.title)
-                                changed_p = True
-                            if pat.search(p.description):
-                                p.description = pat.sub(new_tech, p.description)
-                                changed_p = True
-                        if changed_p:
-                            p.save()
-
-                        for m in p.milestones.all():
-                            changed_m = False
-                            for pat in token_patterns:
-                                if pat.search(m.title):
-                                    m.title = pat.sub(new_tech, m.title)
-                                    changed_m = True
-                                if pat.search(m.description):
-                                    m.description = pat.sub(new_tech, m.description)
-                                    changed_m = True
-                            if changed_m:
-                                m.save()
-
-                            for t in m.tasks.all():
-                                changed_t = False
-                                for pat in token_patterns:
-                                    if pat.search(t.title):
-                                        t.title = pat.sub(new_tech, t.title)
-                                        changed_t = True
-                                    if pat.search(t.description):
-                                        t.description = pat.sub(new_tech, t.description)
-                                        changed_t = True
-                                if changed_t:
-                                    t.save()
-
-                    if project.tech_stack:
-                        changed_proj = False
-                        for pat in token_patterns:
-                            if pat.search(project.tech_stack):
-                                project.tech_stack = pat.sub(new_tech, project.tech_stack)
-                                changed_proj = True
-                        if changed_proj:
-                            project.save()
 
             _validate_and_sanitize_roadmap_consistency(roadmap)
 

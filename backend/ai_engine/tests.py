@@ -306,3 +306,197 @@ class RoadmapAPITests(APITestCase):
         }
         normalized = RoadmapCopilotService._normalize_copilot_data(data)
         self.assertIsNone(normalized['phase_data']['order'])
+
+    def test_quota_limits_prompt_upgrade_selection_not_auto_charge(self):
+        from ai_engine.services import GeminiRoadmapService
+        from ai_engine.views import _validate_and_sanitize_roadmap_consistency
+        raw_data = {
+            'title': 'Test Roadmap',
+            'summary': 'Test Summary',
+            'phases': [
+                {
+                    'phase_number': 1,
+                    'title': 'Phase 1',
+                    'description': 'Foundation',
+                    'duration': '2 Weeks',
+                    'milestones': [{'title': 'M1', 'description': 'M1 desc', 'order': 1, 'tasks': [{'title': 'Setup DB', 'description': 'Configure DB', 'order': 1}]}]
+                },
+                {
+                    'phase_number': 2,
+                    'title': 'Phase 2',
+                    'description': 'Features',
+                    'duration': '2 Weeks',
+                    'milestones': [{'title': 'M2', 'description': 'M2 desc', 'order': 1, 'tasks': [{'title': 'Auto-upgrade user to paid tier', 'description': 'Automatically charge card when 5 GB exceeded', 'order': 1}]}]
+                },
+                {
+                    'phase_number': 3,
+                    'title': 'Phase 3',
+                    'description': 'Deploy',
+                    'duration': '2 Weeks',
+                    'milestones': [{'title': 'M3', 'description': 'M3 desc', 'order': 1, 'tasks': [{'title': 'Deploy to Cloud', 'description': 'Release app', 'order': 1}]}]
+                }
+            ]
+        }
+        validated = GeminiRoadmapService._validate_roadmap_structure(raw_data)
+        p2_task = validated['phases'][1]['milestones'][0]['tasks'][0]
+        self.assertNotIn('auto-upgrade', p2_task['title'].lower())
+        self.assertNotIn('automatically charge', p2_task['description'].lower())
+        self.assertIn('prompt upgrade and plan selection', p2_task['title'].lower())
+
+        roadmap = Roadmap.objects.create(
+            project=self.project1,
+            title='Test Roadmap',
+            summary='Test summary',
+        )
+        phase2 = RoadmapPhase.objects.create(
+            roadmap=roadmap,
+            title='Phase 2: Storage Management',
+            description='File operations',
+            duration='2 Weeks',
+            order=2,
+        )
+        m = RoadmapMilestone.objects.create(
+            phase=phase2,
+            title='Storage limits',
+            description='Enforce 5GB quota',
+            order=1,
+        )
+        task = m.tasks.create(title='Auto-upgrade user on limit', description='Automatically charge account when quota reached', order=1)
+        _validate_and_sanitize_roadmap_consistency(roadmap)
+        task.refresh_from_db()
+        self.assertNotIn('auto-upgrade', task.title.lower())
+        self.assertNotIn('automatically charge', task.description.lower())
+
+    def test_tech_stack_integrity_and_architectural_prompt(self):
+        from ai_engine.services import GeminiRoadmapService
+        self.project1.tech_stack = 'React, Node.js, AWS S3, PostgreSQL'
+        self.project1.save()
+        prompt = GeminiRoadmapService._build_prompt(self.project1)
+        self.assertIn('AWS S3', prompt)
+        self.assertIn('Architecture Source of Truth', prompt)
+        self.assertIn('Quota and Limit Rule', prompt)
+        self.assertIn('NEVER generate automatic purchases', prompt)
+
+    def test_generic_multi_phase_change_preserves_unrelated_phases_and_completed_tasks(self):
+        from ai_engine.services import RoadmapCopilotService
+        roadmap = Roadmap.objects.create(project=self.project1, title='Test Flow', summary='Flow test')
+        p1 = RoadmapPhase.objects.create(roadmap=roadmap, title='Phase 1: Foundation', description='Setup', duration='1 Week', order=1)
+        m1 = RoadmapMilestone.objects.create(phase=p1, title='Infrastructure', description='Base setup', order=1)
+        t1 = m1.tasks.create(title='Init repo', description='Init Git', order=1)
+
+        p2 = RoadmapPhase.objects.create(roadmap=roadmap, title='Phase 2: Core Features', description='Features', duration='2 Weeks', order=2)
+        m2 = RoadmapMilestone.objects.create(phase=p2, title='Auth Module', description='User auth', order=1)
+        t2_completed = m2.tasks.create(title='User Login API', description='JWT login', order=1)
+        t2_pending = m2.tasks.create(title='User Profile API', description='Profile management', order=2)
+
+        p3 = RoadmapPhase.objects.create(roadmap=roadmap, title='Phase 3: Deployment', description='Cloud launch', duration='1 Week', order=3)
+        m3 = RoadmapMilestone.objects.create(phase=p3, title='Production Release', description='Release app', order=1)
+        t3 = m3.tasks.create(title='Deploy containers', description='Kubernetes deploy', order=1)
+
+        mock_ai_output = {
+            'action': 'update_roadmap',
+            'operation': 'update_roadmap',
+            'reason': 'Add image upload capability across storage foundation and API layers',
+            'change_summary': 'Added S3 storage bucket configuration in Phase 1 and multipart upload endpoint in Phase 2.',
+            'explanation': 'Phase 1 and Phase 2 are updated to support image uploading. Please confirm to apply.',
+            'affected_phases': [
+                {
+                    'id': p1.id,
+                    'order': 1,
+                    'title': 'Phase 1: Foundation & Storage',
+                    'description': 'Setup and storage configuration',
+                    'duration': '1 Week',
+                    'milestones': [
+                        {
+                            'id': m1.id,
+                            'title': 'Infrastructure',
+                            'description': 'Base setup',
+                            'order': 1,
+                            'tasks': [
+                                {'id': t1.id, 'title': 'Init repo', 'description': 'Init Git', 'order': 1, 'is_completed': True},
+                                {'id': None, 'title': 'Configure Object Storage Bucket', 'description': 'Setup S3 bucket and CORS', 'order': 2, 'is_completed': False},
+                            ]
+                        }
+                    ]
+                },
+                {
+                    'id': p2.id,
+                    'order': 2,
+                    'title': 'Phase 2: Core Features & Uploads',
+                    'description': 'Features and file upload API',
+                    'duration': '2 Weeks',
+                    'milestones': [
+                        {
+                            'id': m2.id,
+                            'title': 'Auth & File APIs',
+                            'description': 'User auth and files',
+                            'order': 1,
+                            'tasks': [
+                                {'id': t2_completed.id, 'title': 'User Login API', 'description': 'JWT login', 'order': 1, 'is_completed': True},
+                                {'id': t2_pending.id, 'title': 'User Profile API', 'description': 'Profile management', 'order': 2},
+                                {'id': None, 'title': 'Implement Image Upload API', 'description': 'Multipart upload route with validation', 'order': 3},
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }
+
+        resolved = RoadmapCopilotService._apply_generic_roadmap_intent(
+            roadmap=roadmap,
+            data=mock_ai_output,
+            prompt_text="Add image upload across backend",
+            current_tech_stack=self.project1.tech_stack
+        )
+        self.assertEqual(resolved['action'], 'update_roadmap')
+        self.assertEqual(len(resolved['affected_phases']), 2)
+
+        p2_data = resolved['affected_phases'][1]
+        t2_res_completed = next(t for t in p2_data['milestones'][0]['tasks'] if t['id'] == t2_completed.id)
+        self.assertTrue(t2_res_completed['is_completed'])
+
+        apply_url = reverse('project-roadmap-apply-action', kwargs={'project_id': self.project1.id})
+        self.client.force_authenticate(user=self.user1)
+        response = self.client.post(apply_url, data={
+            'action': 'update_roadmap',
+            'affected_phases': resolved['affected_phases'],
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        t2_completed.refresh_from_db()
+        self.assertEqual(t2_completed.title, 'User Login API')
+        self.assertEqual(t2_completed.order, 1)
+
+        p3.refresh_from_db()
+        self.assertEqual(p3.title, 'Phase 3: Deployment')
+        self.assertEqual(p3.milestones.count(), 1)
+        self.assertEqual(p3.milestones.first().tasks.count(), 1)
+
+    def test_explanation_request_is_read_only(self):
+        from ai_engine.services import RoadmapCopilotService
+        roadmap = Roadmap.objects.create(project=self.project1, title='Test Flow', summary='Flow test')
+        mock_data = {'action': 'none', 'operation': 'explanation', 'explanation': 'Here is how Redis is used for caching.'}
+        res = RoadmapCopilotService._apply_generic_roadmap_intent(
+            roadmap=roadmap,
+            data=mock_data,
+            prompt_text="Explain how Redis caching works",
+            current_tech_stack=self.project1.tech_stack
+        )
+        self.assertEqual(res['action'], 'none')
+        self.assertEqual(res['operation'], 'explanation')
+        self.assertIsNone(res.get('affected_phases'))
+        self.assertIsNone(res.get('phase_data'))
+
+    def test_ambiguous_request_returns_clarification(self):
+        from ai_engine.services import RoadmapCopilotService
+        roadmap = Roadmap.objects.create(project=self.project1, title='Test Flow', summary='Flow test')
+        mock_data = {'action': 'none', 'operation': 'clarification', 'explanation': 'Which database do you want to switch to?'}
+        res = RoadmapCopilotService._apply_generic_roadmap_intent(
+            roadmap=roadmap,
+            data=mock_data,
+            prompt_text="change database",
+            current_tech_stack=self.project1.tech_stack
+        )
+        self.assertEqual(res['action'], 'none')
+        self.assertEqual(res['operation'], 'clarification')
+        self.assertIn('?', res['explanation'])
