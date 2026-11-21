@@ -102,6 +102,7 @@ export const roadmapApi = {
       target_phase_order?: number | null;
       new_tech_stack?: string | null;
       affected_phases?: any[] | null;
+      change_summary?: string | null;
     }
   ) =>
     apiRequest<{ message: string; roadmap: Roadmap; project?: any }>(

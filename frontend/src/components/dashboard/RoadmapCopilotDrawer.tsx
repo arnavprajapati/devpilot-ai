@@ -111,10 +111,16 @@ function renderInlineTokens(text: string, isDark: boolean, isUser: boolean = fal
   });
 }
 
+type ListItem = {
+  text: string;
+  num?: number;
+  subItems?: string[];
+};
+
 type MessageBlock =
   | { type: 'heading'; level: number; content: string }
   | { type: 'table'; headers: string[]; rows: string[][] }
-  | { type: 'list'; items: string[]; ordered: boolean }
+  | { type: 'list'; items: ListItem[]; ordered: boolean }
   | { type: 'paragraph'; content: string }
   | { type: 'space' };
 
@@ -164,9 +170,9 @@ function parseMessageBlocks(text: string): MessageBlock[] {
     }
 
     if (/^[-*•]\s+/.test(trimmed)) {
-      const items: string[] = [];
+      const items: ListItem[] = [];
       while (i < lines.length && /^[-*•]\s+/.test(lines[i].trim())) {
-        items.push(lines[i].trim().replace(/^[-*•]\s+/, ''));
+        items.push({ text: lines[i].trim().replace(/^[-*•]\s+/, '') });
         i++;
       }
       blocks.push({ type: 'list', items, ordered: false });
@@ -175,10 +181,44 @@ function parseMessageBlocks(text: string): MessageBlock[] {
 
     const numMatch = trimmed.match(/^(\d+)\.\s+(.*)/);
     if (numMatch) {
-      const items: string[] = [];
-      while (i < lines.length && /^\d+\.\s+/.test(lines[i].trim())) {
-        items.push(lines[i].trim().replace(/^\d+\.\s+/, ''));
-        i++;
+      const items: ListItem[] = [];
+      while (i < lines.length) {
+        const lineTrimmed = lines[i].trim();
+        if (!lineTrimmed) {
+          if (i + 1 < lines.length && (/^\d+\.\s+/.test(lines[i + 1].trim()) || /^[-*•]\s+/.test(lines[i + 1].trim()))) {
+            i++;
+            continue;
+          } else {
+            break;
+          }
+        }
+        const currentNumMatch = lineTrimmed.match(/^(\d+)\.\s+(.*)/);
+        if (currentNumMatch) {
+          const itemNum = parseInt(currentNumMatch[1], 10);
+          const itemText = currentNumMatch[2];
+          i++;
+          const subItems: string[] = [];
+          while (i < lines.length) {
+            const subTrimmed = lines[i].trim();
+            if (!subTrimmed) {
+              if (i + 1 < lines.length && /^[-*•]\s+/.test(lines[i + 1].trim())) {
+                i++;
+                continue;
+              } else {
+                break;
+              }
+            }
+            if (/^[-*•]\s+/.test(subTrimmed)) {
+              subItems.push(subTrimmed.replace(/^[-*•]\s+/, ''));
+              i++;
+            } else {
+              break;
+            }
+          }
+          items.push({ text: itemText, num: itemNum, subItems });
+        } else {
+          break;
+        }
       }
       blocks.push({ type: 'list', items, ordered: true });
       continue;
@@ -273,19 +313,33 @@ function renderFormattedMessage(text: string, isDark: boolean, isUser: boolean =
 
         if (block.type === 'list') {
           return (
-            <div key={bIdx} className="space-y-1.5 pl-1 my-1">
+            <div key={bIdx} className="space-y-2 pl-1 my-1.5">
               {block.items.map((item, itemIdx) => (
-                <div key={itemIdx} className="flex items-start gap-2 text-[13.5px] leading-relaxed">
-                  {block.ordered ? (
-                    <span className="font-mono text-xs font-semibold text-[#FFC900] mt-0.5 shrink-0">
-                      {itemIdx + 1}.
-                    </span>
-                  ) : (
-                    <span className="text-[#FFC900] font-bold text-xs mt-1 shrink-0">•</span>
-                  )}
-                  <div className={`flex-1 ${isDark ? 'text-stone-200' : 'text-stone-900'}`}>
-                    {renderInlineTokens(item, isDark, isUser)}
+                <div key={itemIdx} className="space-y-1">
+                  <div className="flex items-start gap-2 text-[13.5px] leading-relaxed">
+                    {block.ordered ? (
+                      <span className="font-mono text-xs font-semibold text-[#FFC900] mt-0.5 shrink-0">
+                        {item.num ?? itemIdx + 1}.
+                      </span>
+                    ) : (
+                      <span className="text-[#FFC900] font-bold text-xs mt-1 shrink-0">•</span>
+                    )}
+                    <div className={`flex-1 ${isDark ? 'text-stone-200' : 'text-stone-900'}`}>
+                      {renderInlineTokens(item.text, isDark, isUser)}
+                    </div>
                   </div>
+                  {item.subItems && item.subItems.length > 0 && (
+                    <div className="pl-4 space-y-1 my-1 border-l-2 border-stone-200/40 dark:border-stone-800/60 ml-2">
+                      {item.subItems.map((sub, sIdx) => (
+                        <div key={sIdx} className="flex items-start gap-2 text-[13px] leading-relaxed">
+                          <span className="text-[#FFC900] font-bold text-xs mt-0.5 shrink-0">•</span>
+                          <div className={`flex-1 ${isDark ? 'text-stone-300' : 'text-stone-700'}`}>
+                            {renderInlineTokens(sub, isDark, isUser)}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
@@ -324,9 +378,26 @@ export function RoadmapCopilotDrawer({
   const [applyingMessageId, setApplyingMessageId] = useState<string | null>(null);
   const [appliedActionIds, setAppliedActionIds] = useState<Record<string, boolean>>({});
   const [rejectedActionIds, setRejectedActionIds] = useState<Record<string, boolean>>({});
+  const [selectedScopePhaseId, setSelectedScopePhaseId] = useState<number | null>(activePhaseId || null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const activePhase = roadmap?.phases.find((p) => p.id === activePhaseId);
+  const selectedScopePhase = roadmap?.phases.find((p) => p.id === selectedScopePhaseId);
+
+  useEffect(() => {
+    if (activePhaseId !== undefined) {
+      setSelectedScopePhaseId(activePhaseId || null);
+    }
+  }, [activePhaseId]);
+
+  useEffect(() => {
+    if (selectedScopePhaseId && roadmap?.phases) {
+      const exists = roadmap.phases.some((p) => p.id === selectedScopePhaseId);
+      if (!exists) {
+        setSelectedScopePhaseId(null);
+      }
+    }
+  }, [roadmap, selectedScopePhaseId]);
 
   useEffect(() => {
     if (isOpen && messages.length === 0) {
@@ -386,7 +457,7 @@ export function RoadmapCopilotDrawer({
         selectedProject.id,
         content,
         historyPayload,
-        activePhaseId || undefined,
+        selectedScopePhaseId || undefined,
         completedIds
       );
 
@@ -425,14 +496,41 @@ export function RoadmapCopilotDrawer({
     if (copilotRes.action === 'none') return;
     setApplyingMessageId(msgId);
 
+    let targetId = copilotRes.target_phase_id;
+    let targetOrder = copilotRes.target_phase_order;
+
+    if (copilotRes.action === 'edit_phase' || copilotRes.action === 'delete_phase') {
+      let matchedPhase = null;
+      if (targetOrder) {
+        matchedPhase = roadmap?.phases.find((p) => p.order === targetOrder);
+      }
+      if (!matchedPhase && copilotRes.phase_data?.title) {
+        matchedPhase = roadmap?.phases.find(
+          (p) => p.title.toLowerCase().trim() === copilotRes.phase_data!.title.toLowerCase().trim()
+        );
+      }
+      if (!matchedPhase && activePhaseId) {
+        matchedPhase = roadmap?.phases.find((p) => p.id === activePhaseId);
+      }
+      if (!matchedPhase && targetId) {
+        matchedPhase = roadmap?.phases.find((p) => p.id === targetId);
+      }
+
+      if (matchedPhase) {
+        targetId = matchedPhase.id;
+        targetOrder = matchedPhase.order;
+      }
+    }
+
     try {
       const res = await roadmapApi.applyPhaseAction(selectedProject.id, {
         action: copilotRes.action,
         phase_data: copilotRes.phase_data,
-        target_phase_id: copilotRes.target_phase_id,
-        target_phase_order: copilotRes.target_phase_order,
+        target_phase_id: targetId,
+        target_phase_order: targetOrder,
         new_tech_stack: copilotRes.new_tech_stack,
         affected_phases: copilotRes.affected_phases,
+        change_summary: copilotRes.change_summary,
       });
 
       if (res.data?.roadmap) {
@@ -476,13 +574,23 @@ export function RoadmapCopilotDrawer({
     'Use PostgreSQL instead of MongoDB',
     'Add image sharing to chat',
     'Explain roadmap architecture & phases',
-    ...(activePhase ? [`Ask about Phase 0${activePhase.order}: ${activePhase.title}`] : []),
+    ...(selectedScopePhase
+      ? [`Ask about Phase 0${selectedScopePhase.order}: ${selectedScopePhase.title}`]
+      : activePhase
+      ? [`Ask about Phase 0${activePhase.order}: ${activePhase.title}`]
+      : []),
   ];
 
   return (
-    <div className="fixed inset-0 z-50 flex justify-end bg-black/60 backdrop-blur-sm transition-all duration-300">
+    <div className="fixed inset-0 z-50 flex justify-end transition-all duration-300">
       <div
-        className={`w-full sm:w-[560px] md:w-[620px] h-full flex flex-col shadow-2xl transition-transform border-l ${
+        onClick={onClose}
+        aria-label="Close copilot"
+        className="fixed inset-0 bg-black/60 backdrop-blur-sm transition-opacity cursor-pointer"
+      />
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className={`relative z-10 w-full sm:w-[560px] md:w-[620px] h-full flex flex-col shadow-2xl transition-transform border-l ${
           isDark
             ? 'bg-[#0A0A0A] border-[#222222] text-[#E5E5E5]'
             : 'bg-[#FAF8F5] border-[#E5E0D8] text-[#1E1E1E]'
@@ -697,7 +805,7 @@ export function RoadmapCopilotDrawer({
                                   }`}
                                 >
                                   <div className="flex items-center gap-2">
-                                    <span className="font-mono text-[11px] font-bold text-[#FFC900]">0{pIdx + 1}</span>
+                                    <span className="font-mono text-[11px] font-bold text-[#FFC900]">0{p.order || pIdx + 1}</span>
                                     <span className="font-medium truncate max-w-[240px]">{p.title}</span>
                                   </div>
                                   <span className={`text-[11px] font-normal ${isDark ? 'text-stone-400' : 'text-stone-500'}`}>
@@ -809,7 +917,7 @@ export function RoadmapCopilotDrawer({
                                   }`}
                                 >
                                   <div className="flex items-center gap-2">
-                                    <span className="font-mono text-[11px] font-bold text-[#FFC900]">0{pIdx + 1}</span>
+                                    <span className="font-mono text-[11px] font-bold text-[#FFC900]">0{p.order || pIdx + 1}</span>
                                     <span className="font-medium truncate max-w-[240px]">{p.title}</span>
                                   </div>
                                   <span className={`text-[11px] font-normal ${isDark ? 'text-stone-400' : 'text-stone-500'}`}>
@@ -884,7 +992,11 @@ export function RoadmapCopilotDrawer({
                                 : 'bg-amber-50 border-amber-300 text-amber-800'
                             }`}
                           >
-                            {copilot.action === 'add_phase' ? '+ New Phase Proposal' : 'Phase Update'}
+                            {copilot.action === 'add_phase'
+                              ? '+ New Phase Proposal'
+                              : copilot.target_phase_order
+                              ? `Update Phase 0${copilot.target_phase_order}`
+                              : 'Phase Update'}
                           </span>
                           <span className={`text-xs font-normal ${isDark ? 'text-stone-400' : 'text-stone-500'}`}>
                             {copilot.phase_data.duration || '2 Weeks'}
@@ -1137,6 +1249,45 @@ export function RoadmapCopilotDrawer({
             isDark ? 'bg-[#0D0D0D] border-[#222222]' : 'bg-white border-[#E5E0D8]'
           }`}
         >
+          {roadmap?.phases && roadmap.phases.length > 0 && (
+            <div className="flex items-center gap-1.5 overflow-x-auto pb-2.5 mb-2 text-xs scrollbar-none">
+              <button
+                type="button"
+                onClick={() => setSelectedScopePhaseId(null)}
+                className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-xs font-medium whitespace-nowrap transition-colors flex-shrink-0 cursor-pointer ${
+                  selectedScopePhaseId === null
+                    ? 'bg-[#FFC900] text-black border-[#FFC900] shadow-sm font-semibold'
+                    : isDark
+                    ? 'bg-[#161616] border-[#2A2A2A] text-stone-400 hover:text-white hover:border-stone-600'
+                    : 'bg-stone-100 border-stone-200 text-stone-600 hover:text-stone-900 hover:border-stone-300'
+                }`}
+              >
+                <Layers className="w-3.5 h-3.5" />
+                <span>All Phases</span>
+              </button>
+              {roadmap.phases.map((p) => {
+                const isSelected = selectedScopePhaseId === p.id;
+                return (
+                  <button
+                    key={p.id}
+                    type="button"
+                    onClick={() => setSelectedScopePhaseId(p.id)}
+                    className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-xs font-medium whitespace-nowrap transition-colors flex-shrink-0 max-w-[180px] sm:max-w-[220px] cursor-pointer ${
+                      isSelected
+                        ? 'bg-[#FFC900] text-black border-[#FFC900] shadow-sm font-semibold'
+                        : isDark
+                        ? 'bg-[#161616] border-[#2A2A2A] text-stone-400 hover:text-white hover:border-stone-600'
+                        : 'bg-stone-100 border-stone-200 text-stone-600 hover:text-stone-900 hover:border-stone-300'
+                    }`}
+                  >
+                    <span className="font-mono text-[11px] opacity-75">0{p.order}</span>
+                    <span className="truncate">{p.title}</span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+
           <form
             onSubmit={(e) => {
               e.preventDefault();
@@ -1144,22 +1295,64 @@ export function RoadmapCopilotDrawer({
             }}
             className="flex items-center gap-2"
           >
-            <input
-              type="text"
-              value={inputText}
-              onChange={(e) => setInputText(e.target.value)}
-              placeholder="Ask AI to explain, add, edit, or remove phases..."
-              disabled={isLoading}
-              className={`flex-1 px-4 py-3 rounded-xl border text-sm sm:text-[15px] focus:outline-none transition-all ${
+            <div
+              className={`flex-1 flex items-center gap-2 px-3 py-2 rounded-xl border transition-all ${
                 isDark
-                  ? 'bg-[#161616] border-[#2E2E2E] text-white placeholder-gray-500 focus:border-[#FFC900]'
-                  : 'bg-gray-50 border-gray-300 text-black placeholder-gray-400 focus:border-[#FFC900]'
+                  ? 'bg-[#161616] border-[#2E2E2E] focus-within:border-[#FFC900]'
+                  : 'bg-gray-50 border-gray-300 focus-within:border-[#FFC900]'
               }`}
-            />
+            >
+              {selectedScopePhase ? (
+                <div
+                  className={`flex items-center gap-1.5 px-2 py-1 rounded-md text-xs font-medium flex-shrink-0 ${
+                    isDark
+                      ? 'bg-[#222222] text-[#FFC900] border border-[#FFC900]/30'
+                      : 'bg-[#FFF9E6] text-[#B28900] border border-[#FFC900]/40'
+                  }`}
+                >
+                  <span className="font-semibold">Phase 0{selectedScopePhase.order}:</span>
+                  <span className="max-w-[110px] sm:max-w-[170px] truncate">{selectedScopePhase.title}</span>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setSelectedScopePhaseId(null);
+                    }}
+                    title="Switch to All Phases"
+                    className="p-0.5 rounded hover:bg-black/10 dark:hover:bg-white/10 text-current transition-colors ml-0.5 cursor-pointer"
+                  >
+                    <X className="w-3 h-3" />
+                  </button>
+                </div>
+              ) : (
+                <div
+                  className={`flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium flex-shrink-0 ${
+                    isDark ? 'bg-[#222222] text-stone-400' : 'bg-stone-200/70 text-stone-600'
+                  }`}
+                >
+                  <Layers className="w-3 h-3" />
+                  <span>All Phases</span>
+                </div>
+              )}
+
+              <input
+                type="text"
+                value={inputText}
+                onChange={(e) => setInputText(e.target.value)}
+                placeholder={
+                  selectedScopePhase
+                    ? `Ask or instruct about Phase 0${selectedScopePhase.order} (e.g. "add image upload")...`
+                    : "Ask AI to explain, add, edit, or remove phases..."
+                }
+                disabled={isLoading}
+                className="flex-1 bg-transparent text-sm sm:text-[15px] focus:outline-none min-w-0"
+              />
+            </div>
+
             <button
               type="submit"
               disabled={!inputText.trim() || isLoading}
-              className="px-4 py-3 cursor-pointer rounded-xl bg-[#FFC900] hover:bg-[#E5B500] text-black font-bold flex items-center justify-center transition-all disabled:opacity-40 disabled:hover:bg-[#FFC900] active:scale-95"
+              className="px-4 py-3 cursor-pointer rounded-xl bg-[#FFC900] hover:bg-[#E5B500] text-black font-bold flex items-center justify-center transition-all disabled:opacity-40 disabled:hover:bg-[#FFC900] active:scale-95 flex-shrink-0"
             >
               {isLoading ? (
                 <Loader2 className="w-5 h-5 animate-spin" />

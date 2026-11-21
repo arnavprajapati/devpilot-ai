@@ -1,3 +1,4 @@
+import re
 from django.db import transaction
 from django.shortcuts import get_object_or_404
 from rest_framework import status
@@ -52,6 +53,13 @@ class ProjectRoadmapGenerateView(APIView):
                 status=status.HTTP_502_BAD_GATEWAY,
             )
 
+        phases_data = roadmap_data.get('phases', [])
+        if not phases_data or len(phases_data) < 3:
+            return Response(
+                {'error': 'Roadmap generation produced an incomplete or single-phase plan. Please try regenerating.'},
+                status=status.HTTP_502_BAD_GATEWAY
+            )
+
         with transaction.atomic():
             try:
                 project.roadmap.delete()
@@ -64,7 +72,6 @@ class ProjectRoadmapGenerateView(APIView):
                 summary=roadmap_data.get('summary', ''),
             )
 
-            phases_data = roadmap_data.get('phases', [])
             for p_idx, phase_data in enumerate(phases_data, start=1):
                 phase = RoadmapPhase.objects.create(
                     roadmap=roadmap,
@@ -137,13 +144,34 @@ class ProjectRoadmapChatCopilotView(APIView):
 def _sync_milestones_and_tasks(phase, milestones_data):
     existing_milestones = list(phase.milestones.all().order_by('order'))
     kept_milestone_ids = []
+    used_milestone_ids = set()
+
     for m_idx, m_item in enumerate(milestones_data, start=1):
-        m_title = m_item.get('title', f"Milestone {m_idx}")
+        m_title = (m_item.get('title') or f"Milestone {m_idx}").strip()
         m_desc = m_item.get('description', '')
         matched_m = None
-        if m_idx <= len(existing_milestones):
-            matched_m = existing_milestones[m_idx - 1]
+
+        m_id = m_item.get('id')
+        if m_id:
+            for em in existing_milestones:
+                if em.id == m_id and em.id not in used_milestone_ids:
+                    matched_m = em
+                    break
+
+        if not matched_m:
+            for em in existing_milestones:
+                if em.title.strip().lower() == m_title.lower() and em.id not in used_milestone_ids:
+                    matched_m = em
+                    break
+
+        if not matched_m and len(existing_milestones) == len(milestones_data):
+            for em in existing_milestones:
+                if em.order == m_idx and em.id not in used_milestone_ids:
+                    matched_m = em
+                    break
+
         if matched_m:
+            used_milestone_ids.add(matched_m.id)
             matched_m.title = m_title
             matched_m.description = m_desc
             matched_m.order = m_idx
@@ -160,13 +188,35 @@ def _sync_milestones_and_tasks(phase, milestones_data):
 
         existing_tasks = list(milestone.tasks.all().order_by('order'))
         kept_task_ids = []
-        for t_idx, t_item in enumerate(m_item.get('tasks', []), start=1):
-            t_title = t_item.get('title', f"Task {t_idx}")
+        used_task_ids = set()
+        raw_tasks = m_item.get('tasks', [])
+
+        for t_idx, t_item in enumerate(raw_tasks, start=1):
+            t_title = (t_item.get('title') or f"Task {t_idx}").strip()
             t_desc = t_item.get('description', '')
             matched_t = None
-            if t_idx <= len(existing_tasks):
-                matched_t = existing_tasks[t_idx - 1]
+
+            t_id = t_item.get('id')
+            if t_id:
+                for et in existing_tasks:
+                    if et.id == t_id and et.id not in used_task_ids:
+                        matched_t = et
+                        break
+
+            if not matched_t:
+                for et in existing_tasks:
+                    if et.title.strip().lower() == t_title.lower() and et.id not in used_task_ids:
+                        matched_t = et
+                        break
+
+            if not matched_t and len(existing_tasks) == len(raw_tasks):
+                for et in existing_tasks:
+                    if et.order == t_idx and et.id not in used_task_ids:
+                        matched_t = et
+                        break
+
             if matched_t:
+                used_task_ids.add(matched_t.id)
                 matched_t.title = t_title
                 matched_t.description = t_desc
                 matched_t.order = t_idx
@@ -182,6 +232,32 @@ def _sync_milestones_and_tasks(phase, milestones_data):
             kept_task_ids.append(task.id)
         milestone.tasks.exclude(id__in=kept_task_ids).delete()
     phase.milestones.exclude(id__in=kept_milestone_ids).delete()
+
+
+def _validate_and_sanitize_roadmap_consistency(roadmap):
+    existing_phases = list(roadmap.phases.all().order_by('order'))
+    for idx, p in enumerate(existing_phases, start=1):
+        if p.order != idx:
+            p.order = idx
+            p.save()
+        existing_milestones = list(p.milestones.all().order_by('order'))
+        for m_idx, m in enumerate(existing_milestones, start=1):
+            if m.order != m_idx:
+                m.order = m_idx
+                m.save()
+            seen_task_titles = set()
+            existing_tasks = list(m.tasks.all().order_by('order'))
+            active_task_idx = 1
+            for t in existing_tasks:
+                clean_title = (t.title or '').strip().lower()
+                if not clean_title or clean_title in seen_task_titles:
+                    t.delete()
+                    continue
+                seen_task_titles.add(clean_title)
+                if t.order != active_task_idx:
+                    t.order = active_task_idx
+                    t.save()
+                active_task_idx += 1
 
 
 class ProjectRoadmapApplyPhaseActionView(APIView):
@@ -246,24 +322,44 @@ class ProjectRoadmapApplyPhaseActionView(APIView):
 
             elif action == 'edit_phase':
                 phase = None
+                phase_by_id = None
+                phase_by_order = None
+
                 if target_phase_id:
-                    phase = roadmap.phases.filter(id=target_phase_id).first()
-                if not phase and target_phase_order:
-                    phase = roadmap.phases.filter(order=target_phase_order).first()
-                if not phase and roadmap.phases.exists():
-                    phase = roadmap.phases.first()
+                    try:
+                        phase_by_id = roadmap.phases.filter(id=int(target_phase_id)).first()
+                    except (ValueError, TypeError):
+                        pass
 
-                if phase:
-                    if phase_data.get('title'):
-                        phase.title = phase_data['title']
-                    if phase_data.get('description') is not None:
-                        phase.description = phase_data['description']
-                    if phase_data.get('duration'):
-                        phase.duration = phase_data['duration']
-                    phase.save()
+                if target_phase_order:
+                    try:
+                        phase_by_order = roadmap.phases.filter(order=int(target_phase_order)).first()
+                    except (ValueError, TypeError):
+                        pass
 
-                    if phase_data.get('milestones'):
-                        _sync_milestones_and_tasks(phase, phase_data['milestones'])
+                if phase_by_order and phase_by_id and phase_by_id != phase_by_order:
+                    phase = phase_by_order
+                elif phase_by_id:
+                    phase = phase_by_id
+                elif phase_by_order:
+                    phase = phase_by_order
+
+                if not phase and phase_data.get('title'):
+                    phase = roadmap.phases.filter(title__iexact=phase_data['title'].strip()).first()
+
+                if not phase:
+                    return Response({'error': f"Target phase not found in roadmap (target_phase_id={target_phase_id}, target_phase_order={target_phase_order})."}, status=status.HTTP_404_NOT_FOUND)
+
+                if phase_data.get('title'):
+                    phase.title = phase_data['title']
+                if phase_data.get('description') is not None:
+                    phase.description = phase_data['description']
+                if phase_data.get('duration'):
+                    phase.duration = phase_data['duration']
+                phase.save()
+
+                if phase_data.get('milestones'):
+                    _sync_milestones_and_tasks(phase, phase_data['milestones'])
 
             elif action == 'reorder_phase':
                 phase = None
@@ -299,48 +395,150 @@ class ProjectRoadmapApplyPhaseActionView(APIView):
 
             elif action in ['update_tech_stack', 'update_roadmap']:
                 new_tech_stack = request.data.get('new_tech_stack')
-                if action == 'update_tech_stack' and new_tech_stack and str(new_tech_stack).strip():
+                if new_tech_stack and str(new_tech_stack).strip():
                     project.tech_stack = str(new_tech_stack).strip()
                     project.save()
 
                 affected_phases = request.data.get('affected_phases') or []
                 if affected_phases:
-                    existing_phases = list(roadmap.phases.all().order_by('order'))
+                    existing_phases_count = roadmap.phases.count()
+                    is_full_stack_replacement = (action == 'update_tech_stack' and len(affected_phases) >= existing_phases_count)
                     kept_phase_ids = []
+
                     for p_idx, p_item in enumerate(affected_phases, start=1):
-                        p_title = p_item.get('title', f"Phase {p_idx}")
+                        if not isinstance(p_item, dict):
+                            continue
+                        p_title = (p_item.get('title') or '').strip()
                         p_desc = p_item.get('description', '')
                         p_dur = p_item.get('duration', '2 Weeks')
+                        p_id = p_item.get('id') or p_item.get('target_phase_id')
+                        p_order = p_item.get('order')
+
                         target_p = None
-                        p_id = p_item.get('id')
                         if p_id:
-                            target_p = roadmap.phases.filter(id=p_id).first()
-                        if not target_p and p_idx <= len(existing_phases):
-                            target_p = existing_phases[p_idx - 1]
+                            try:
+                                target_p = roadmap.phases.filter(id=int(p_id)).first()
+                            except (ValueError, TypeError):
+                                pass
+
+                        if not target_p and p_order:
+                            try:
+                                target_p = roadmap.phases.filter(order=int(p_order)).first()
+                            except (ValueError, TypeError):
+                                pass
+
+                        if not target_p and p_title:
+                            target_p = roadmap.phases.filter(title__iexact=p_title).first()
+
+                        if not target_p and len(affected_phases) == 1 and target_phase_order:
+                            try:
+                                target_p = roadmap.phases.filter(order=int(target_phase_order)).first()
+                            except (ValueError, TypeError):
+                                pass
+
+                        if not target_p and len(affected_phases) == 1 and target_phase_id:
+                            try:
+                                candidate = roadmap.phases.filter(id=int(target_phase_id)).first()
+                                if candidate and (not p_title or candidate.title.strip().lower() == p_title.lower()):
+                                    target_p = candidate
+                            except (ValueError, TypeError):
+                                pass
+
                         if target_p:
-                            target_p.title = p_title
-                            target_p.description = p_desc
-                            target_p.duration = p_dur
-                            target_p.order = p_idx
+                            if p_title:
+                                target_p.title = p_title
+                            if p_desc is not None:
+                                target_p.description = p_desc
+                            if p_dur:
+                                target_p.duration = p_dur
                             target_p.save()
-                            curr_phase = target_p
-                        else:
-                            curr_phase = RoadmapPhase.objects.create(
+                            kept_phase_ids.append(target_p.id)
+                            if p_item.get('milestones'):
+                                _sync_milestones_and_tasks(target_p, p_item['milestones'])
+                        elif is_full_stack_replacement:
+                            created_order = p_order if p_order else p_idx
+                            new_phase = RoadmapPhase.objects.create(
                                 roadmap=roadmap,
-                                title=p_title,
+                                title=p_title or f"Phase {created_order}",
                                 description=p_desc,
                                 duration=p_dur,
-                                order=p_idx,
+                                order=created_order,
                             )
-                        kept_phase_ids.append(curr_phase.id)
-                        if p_item.get('milestones'):
-                            _sync_milestones_and_tasks(curr_phase, p_item['milestones'])
-                    roadmap.phases.exclude(id__in=kept_phase_ids).delete()
+                            kept_phase_ids.append(new_phase.id)
+                            if p_item.get('milestones'):
+                                _sync_milestones_and_tasks(new_phase, p_item['milestones'])
 
-            for idx, p in enumerate(roadmap.phases.all().order_by('order'), start=1):
-                if p.order != idx:
-                    p.order = idx
-                    p.save()
+                    if is_full_stack_replacement and kept_phase_ids:
+                        roadmap.phases.exclude(id__in=kept_phase_ids).delete()
+
+                all_affected_text = " ".join([
+                    f"{p.get('title', '')} {p.get('description', '')} " +
+                    " ".join([f"{m.get('title', '')} {m.get('description', '')} " +
+                              " ".join([f"{t.get('title', '')} {t.get('description', '')}" for t in m.get('tasks', [])])
+                              for m in p.get('milestones', [])])
+                    for p in affected_phases if isinstance(p, dict)
+                ])
+
+                old_tech, new_tech = RoadmapCopilotService._extract_technology_migration(
+                    prompt_text=all_affected_text,
+                    current_tech_stack=project.tech_stack,
+                    new_tech_stack=request.data.get('new_tech_stack', ''),
+                    change_summary=request.data.get('change_summary', '')
+                )
+                if old_tech and new_tech:
+                    old_tokens = [old_tech]
+                    cleaned_sub = re.sub(r'^(?:AWS|GCP|Azure)\s+', '', old_tech, flags=re.IGNORECASE).strip()
+                    if cleaned_sub and cleaned_sub.lower() != old_tech.lower() and len(cleaned_sub) >= 2:
+                        old_tokens.append(cleaned_sub)
+
+                    token_patterns = [re.compile(rf'\b{re.escape(tok)}\b', re.IGNORECASE) for tok in old_tokens]
+
+                    for p in roadmap.phases.all():
+                        changed_p = False
+                        for pat in token_patterns:
+                            if pat.search(p.title):
+                                p.title = pat.sub(new_tech, p.title)
+                                changed_p = True
+                            if pat.search(p.description):
+                                p.description = pat.sub(new_tech, p.description)
+                                changed_p = True
+                        if changed_p:
+                            p.save()
+
+                        for m in p.milestones.all():
+                            changed_m = False
+                            for pat in token_patterns:
+                                if pat.search(m.title):
+                                    m.title = pat.sub(new_tech, m.title)
+                                    changed_m = True
+                                if pat.search(m.description):
+                                    m.description = pat.sub(new_tech, m.description)
+                                    changed_m = True
+                            if changed_m:
+                                m.save()
+
+                            for t in m.tasks.all():
+                                changed_t = False
+                                for pat in token_patterns:
+                                    if pat.search(t.title):
+                                        t.title = pat.sub(new_tech, t.title)
+                                        changed_t = True
+                                    if pat.search(t.description):
+                                        t.description = pat.sub(new_tech, t.description)
+                                        changed_t = True
+                                if changed_t:
+                                    t.save()
+
+                    if project.tech_stack:
+                        changed_proj = False
+                        for pat in token_patterns:
+                            if pat.search(project.tech_stack):
+                                project.tech_stack = pat.sub(new_tech, project.tech_stack)
+                                changed_proj = True
+                        if changed_proj:
+                            project.save()
+
+            _validate_and_sanitize_roadmap_consistency(roadmap)
 
             roadmap.refresh_from_db()
             WhiteboardService.generate_initial_whiteboard(roadmap)

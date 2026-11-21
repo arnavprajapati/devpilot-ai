@@ -57,7 +57,7 @@ export function SignupView({ onNavigate }: SignupViewProps) {
 
   return (
     <div
-      className={`h-screen max-h-screen overflow-hidden flex flex-col justify-center items-center px-4 relative select-none transition-colors duration-300 ${
+      className={`h-screen max-h-screen overflow-hidden flex flex-col justify-center items-center px-4 relative transition-colors duration-300 ${
         isDark ? 'bg-[#08090B] text-[#F5F3EF]' : 'bg-[#F7F3EA] text-[#171717]'
       }`}
     >

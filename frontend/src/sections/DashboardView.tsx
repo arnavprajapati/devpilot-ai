@@ -393,7 +393,7 @@ export function DashboardView({ onNavigate }: DashboardViewProps) {
 
   return (
     <div
-      className={`min-h-screen flex flex-col select-none transition-colors duration-300 relative overflow-hidden ${
+      className={`min-h-screen flex flex-col transition-colors duration-300 relative overflow-hidden ${
         isDark ? 'bg-[#08090B] text-[#F5F3EF]' : 'bg-[#F7F3EA] text-[#171717]'
       }`}
     >
@@ -414,7 +414,7 @@ export function DashboardView({ onNavigate }: DashboardViewProps) {
 
       <main className="flex-1 w-full max-w-[1536px] mx-auto px-4 sm:px-8 lg:px-12 py-8 sm:py-12 relative z-10">
         <div className="flex flex-col items-center justify-center text-center mb-10">
-          <div className="inline-flex flex-col items-center select-none">
+          <div className="inline-flex flex-col items-center">
             <span
               className={`text-[11px] sm:text-sm font-bold uppercase tracking-widest mb-2 flex items-center gap-2 ${
                 isDark ? 'text-[#FFC900]' : 'text-[#D9A300]'

@@ -494,7 +494,7 @@ export function ProjectRoadmapView({
                                 <div
                                   key={task.id}
                                   onClick={() => toggleTaskCompleted(task.id)}
-                                  className={`flex items-start gap-2.5 cursor-pointer select-none text-sm font-medium transition-colors group ${isChecked
+                                  className={`flex items-start gap-2.5 cursor-pointer text-sm font-medium transition-colors group ${isChecked
                                     ? isDark
                                       ? 'text-[#A6A4A0]/60'
                                       : 'text-[#6B665E]/60'
@@ -1052,7 +1052,7 @@ export function ProjectRoadmapView({
                                       <li
                                         key={task.id}
                                         onClick={() => toggleTaskCompleted(task.id)}
-                                        className={`flex items-start gap-3 py-1.5 cursor-pointer select-none transition-colors group ${isChecked
+                                        className={`flex items-start gap-3 py-1.5 cursor-pointer transition-colors group ${isChecked
                                           ? isDark
                                             ? 'text-[#A6A4A0]/60'
                                             : 'text-stone-400'

@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import requests
 from django.conf import settings
@@ -9,12 +10,15 @@ from typing import List, Optional, Literal
 
 
 class GeneratedTaskSchema(BaseModel):
+    id: Optional[int] = Field(default=None, description="Stable database ID of task")
     title: str = Field(description="Actionable task title")
     description: str = Field(default="", description="One-sentence implementation note")
     order: int = Field(default=1)
+    is_completed: Optional[bool] = Field(default=None, description="Completion status")
 
 
 class GeneratedMilestoneSchema(BaseModel):
+    id: Optional[int] = Field(default=None, description="Stable database ID of milestone")
     title: str = Field(description="Milestone deliverable title")
     description: str = Field(default="", description="One-sentence deliverable objective")
     order: int = Field(default=1)
@@ -22,6 +26,7 @@ class GeneratedMilestoneSchema(BaseModel):
 
 
 class GeneratedPhaseSchema(BaseModel):
+    id: Optional[int] = Field(default=None, description="Stable database ID of phase")
     title: str = Field(description="Phase title")
     description: str = Field(default="", description="One-sentence phase goal")
     duration: str = Field(default="2 Weeks", description="Duration e.g. Weeks 1-3")
@@ -38,9 +43,13 @@ class GeneratedRoadmapSchema(BaseModel):
 class RoadmapCopilotResponse(BaseModel):
     explanation: str = Field(default="", description="Helpful, conversational explanation of architecture, use cases, and changes.")
     action: Literal["none", "add_phase", "edit_phase", "delete_phase", "update_tech_stack", "update_roadmap"] = Field(default="none", description="Action type: none, add_phase, edit_phase, delete_phase, update_tech_stack, update_roadmap")
+    operation: Optional[Literal["explanation", "clarification", "add_task", "edit_task", "remove_task", "add_phase", "edit_phase", "delete_phase", "update_tech_stack", "update_roadmap"]] = Field(default=None, description="Specific structured operation")
     phase_data: Optional[GeneratedPhaseSchema] = Field(default=None, description="New or edited phase details when action is add_phase or edit_phase")
     target_phase_id: Optional[int] = Field(default=None, description="Database ID of target phase being edited or deleted")
     target_phase_order: Optional[int] = Field(default=None, description="Phase order/number of target phase being edited or deleted")
+    target_task_ids: Optional[List[int]] = Field(default=None, description="List of target task IDs affected or removed")
+    changed_fields: Optional[List[str]] = Field(default=None, description="Names of fields changed")
+    reason: Optional[str] = Field(default=None, description="Technical reason for the change")
     new_tech_stack: Optional[str] = Field(default=None, description="Updated tech stack when action is update_tech_stack")
     affected_phases: Optional[List[GeneratedPhaseSchema]] = Field(default=None, description="List of updated phases when action is update_tech_stack or update_roadmap")
     change_summary: Optional[str] = Field(default=None, description="Clear summary of proposed changes before user accepts")
@@ -181,25 +190,54 @@ class GeminiRoadmapService:
     @classmethod
     def _build_prompt(cls, project):
         return (
-            f"You are a Principal Software Architect. Generate a production-grade engineering roadmap tailored specifically to the project scope and complexity.\n\n"
-            f"Project: {project.name}\n"
+            f"You are a Principal Software Architect. Generate a complete, production-grade engineering roadmap tailored specifically to the project scope, requirements, and tech stack.\n\n"
+            f"Project Name: {project.name}\n"
             f"Description: {project.description}\n"
             f"Tech Stack: {project.tech_stack or 'Modern Full-Stack'}\n"
             f"Requirements: {project.requirements or 'Standard production architecture'}\n\n"
-            f"Rules:\n"
-            f"- Dynamically determine the realistic number of development phases (typically 3 to 5 phases) based on '{project.name}' actual scope and complexity. Do not force a fixed number.\n"
-            f"- Each phase should have 2 to 3 key milestones.\n"
-            f"- Under each milestone, provide 2 to 4 actionable tasks tailored to the tech stack.\n"
-            f"- Keep task descriptions concise (under 15 words) and direct.\n"
-            f"- No generic placeholders. Tailor all items specifically to '{project.name}'."
+            f"Mandatory Phased Architecture Rules:\n"
+            f"1. Generate a COMPLETE roadmap spanning as many distinct, chronological phases as the project needs (minimum 3 to 5 phases). Do NOT cram the entire project into Phase 1.\n"
+            f"2. Strict Dependency Order across phases:\n"
+            f"   - Phase 1 (Foundation & Core Infrastructure): ONLY setup, boilerplate, development environment, base database schema/migrations, and core configuration. NEVER put business features, QA, or deployment in Phase 1.\n"
+            f"   - Phase 2 (Core Features & Domain Logic): Primary application entities, core business workflows, API routes, and main user interactions.\n"
+            f"   - Phase 3 (Advanced Features & Integrations): Secondary capabilities, third-party integrations, caching, message queues, real-time sync, and notifications.\n"
+            f"   - Phase 4 (Security Auditing, Optimization & QA): End-to-end testing, security audits, vulnerability scans, caching optimizations, and load testing.\n"
+            f"   - Phase 5 (CI/CD, Cloud Deployment & Launch): Build pipeline, container registry, cloud infrastructure provisioning, production deployment, and monitoring.\n"
+            f"3. Each phase MUST have:\n"
+            f"   - A distinct title reflecting its specific goal.\n"
+            f"   - A realistic duration (e.g. '2 Weeks', '3 Weeks', '4 Weeks').\n"
+            f"   - Sequential order (1, 2, 3, ...).\n"
+            f"   - 2 to 3 focused milestones with actionable deliverables.\n"
+            f"4. Under each milestone, provide 2 to 4 actionable tasks tailored specifically to '{project.name}' and its tech stack.\n"
+            f"5. No generic placeholders. Provide detailed, technical descriptions for every phase, milestone, and task."
         )
+
+    @classmethod
+    def _validate_roadmap_structure(cls, data):
+        if not isinstance(data, dict):
+            raise ValueError("Roadmap data must be a dictionary.")
+        phases = data.get('phases')
+        if not isinstance(phases, list) or len(phases) < 3:
+            raise ValueError(f"Roadmap must contain at least 3 logical development phases, found {len(phases) if isinstance(phases, list) else 0}.")
+        for idx, phase in enumerate(phases, start=1):
+            if not isinstance(phase, dict):
+                raise ValueError(f"Phase {idx} is invalid.")
+            if not phase.get('title'):
+                raise ValueError(f"Phase {idx} is missing a title.")
+            milestones = phase.get('milestones', [])
+            if not milestones or not isinstance(milestones, list):
+                raise ValueError(f"Phase {idx} ('{phase.get('title')}') has no milestones.")
+            has_tasks = any(m.get('tasks') for m in milestones if isinstance(m, dict))
+            if not has_tasks:
+                raise ValueError(f"Phase {idx} ('{phase.get('title')}') has no actionable tasks.")
+        return data
 
     @classmethod
     def _parse_response(cls, raw_text):
         raw_text = raw_text.strip()
         try:
             validated = GeneratedRoadmapSchema.model_validate_json(raw_text)
-            return validated.model_dump()
+            dumped = validated.model_dump()
         except Exception:
             cleaned = raw_text
             for prefix in ('```json', '```'):
@@ -209,7 +247,8 @@ class GeminiRoadmapService:
                 cleaned = cleaned[:-3]
             parsed = json.loads(cleaned.strip())
             validated = GeneratedRoadmapSchema.model_validate(parsed)
-            return validated.model_dump()
+            dumped = validated.model_dump()
+        return cls._validate_roadmap_structure(dumped)
 
     @classmethod
     def generate_roadmap(cls, project):
@@ -217,12 +256,13 @@ class GeminiRoadmapService:
             try:
                 system_instruction = (
                     "You are a Principal Software Architect. Generate a production-grade engineering roadmap tailored specifically to the project scope and complexity. "
+                    "Split work into ordered logical phases (minimum 3 to 5 phases). Phase 1 is strictly foundation and infrastructure. Later phases must cover core features, integrations, security, and deployment in dependency order. Do not cram everything into Phase 1. "
                     "Output valid JSON matching this schema: title (str), summary (str), and phases (list of phases each with phase_number (int), title (str), description (str), duration (str), milestones (list of milestones each with title (str), description (str), order (int), tasks (list of tasks each with title (str), description (str), order (int))))."
                 )
                 prompt = cls._build_prompt(project)
                 raw_json = GroqService.generate_json(system_instruction, prompt)
                 validated = GeneratedRoadmapSchema.model_validate(raw_json)
-                return validated.model_dump()
+                return cls._validate_roadmap_structure(validated.model_dump())
             except Exception:
                 pass
 
@@ -246,7 +286,7 @@ class GeminiRoadmapService:
                         response_mime_type='application/json',
                         response_schema=GeneratedRoadmapSchema,
                         temperature=0.2,
-                        max_output_tokens=3072,
+                        max_output_tokens=8192,
                     ),
                 )
                 raw_text = response.text or ''
@@ -707,9 +747,25 @@ class RoadmapCopilotService:
         if data.get('action') not in valid_actions:
             data['action'] = 'none'
 
+        if not data.get('operation'):
+            action_to_op = {
+                'none': 'explanation',
+                'add_phase': 'add_phase',
+                'edit_phase': 'edit_phase',
+                'delete_phase': 'delete_phase',
+                'update_tech_stack': 'update_tech_stack',
+                'update_roadmap': 'update_roadmap',
+            }
+            data['operation'] = action_to_op.get(data.get('action'), 'explanation')
+
         def _norm_single_phase(p, default_idx=None):
             if not isinstance(p, dict):
                 return p
+            if 'id' in p and p['id'] is not None:
+                try:
+                    p['id'] = int(p['id'])
+                except (ValueError, TypeError):
+                    p['id'] = None
             if not p.get('description'):
                 p_title = p.get('title', 'Development Phase')
                 p['description'] = f"Comprehensive architecture and implementation for {p_title}."
@@ -723,6 +779,11 @@ class RoadmapCopilotService:
             milestones = p.get('milestones', [])
             for m_idx, m in enumerate(milestones, start=1):
                 if isinstance(m, dict):
+                    if 'id' in m and m['id'] is not None:
+                        try:
+                            m['id'] = int(m['id'])
+                        except (ValueError, TypeError):
+                            m['id'] = None
                     m_title = m.get('title') or f"Milestone {m_idx}"
                     if not m.get('description'):
                         m['description'] = f"Deliver and validate core components for {m_title}."
@@ -732,16 +793,24 @@ class RoadmapCopilotService:
                         if isinstance(t, str):
                             t_title = t.strip()
                             t_desc = f"Implement and configure {t_title}."
-                            norm_tasks.append({'title': t_title, 'description': t_desc, 'order': t_idx})
+                            norm_tasks.append({'id': None, 'title': t_title, 'description': t_desc, 'order': t_idx, 'is_completed': None})
                         elif isinstance(t, dict):
+                            t_id = None
+                            if 'id' in t and t['id'] is not None:
+                                try:
+                                    t_id = int(t['id'])
+                                except (ValueError, TypeError):
+                                    t_id = None
                             t_title = t.get('title') or t.get('name') or f'Task {t_idx}'
                             t_desc = (t.get('description') or '').strip()
                             if not t_desc:
                                 t_desc = f"Implement and verify {t_title}."
                             norm_tasks.append({
+                                'id': t_id,
                                 'title': t_title,
                                 'description': t_desc,
-                                'order': t.get('order', t_idx)
+                                'order': t.get('order', t_idx),
+                                'is_completed': t.get('is_completed'),
                             })
                     m['tasks'] = norm_tasks
                     if 'order' not in m:
@@ -755,6 +824,446 @@ class RoadmapCopilotService:
         affected = data.get('affected_phases')
         if isinstance(affected, list):
             data['affected_phases'] = [_norm_single_phase(p, idx) for idx, p in enumerate(affected, start=1)]
+
+        return data
+
+    @classmethod
+    def _resolve_target_phase(cls, roadmap, data, active_phase=None, prompt_text=""):
+        if not isinstance(data, dict):
+            return data
+        action = data.get('action')
+        if action in ['edit_phase', 'delete_phase']:
+            target_phase = None
+            target_id = data.get('target_phase_id')
+            target_order = data.get('target_phase_order')
+            phase_data = data.get('phase_data') or {}
+            phase_title = (phase_data.get('title') or '').strip().lower()
+
+            prompt_phase_match = re.search(r'\bphase\s*(\d+)\b', prompt_text or '', re.IGNORECASE)
+            if prompt_phase_match:
+                try:
+                    p_num = int(prompt_phase_match.group(1))
+                    target_phase = roadmap.phases.filter(order=p_num).first()
+                except (ValueError, TypeError):
+                    pass
+
+            if not target_phase and target_order:
+                try:
+                    target_phase = roadmap.phases.filter(order=int(target_order)).first()
+                except (ValueError, TypeError):
+                    pass
+
+            if not target_phase and target_id:
+                try:
+                    target_phase = roadmap.phases.filter(id=int(target_id)).first()
+                except (ValueError, TypeError):
+                    pass
+
+            if not target_phase and phase_title:
+                target_phase = roadmap.phases.filter(title__iexact=phase_title).first()
+
+            if not target_phase and active_phase:
+                target_phase = active_phase
+
+            if target_phase:
+                data['target_phase_id'] = target_phase.id
+                data['target_phase_order'] = target_phase.order
+                if isinstance(data.get('phase_data'), dict):
+                    data['phase_data']['order'] = target_phase.order
+
+        elif action in ['update_roadmap', 'update_tech_stack']:
+            affected = data.get('affected_phases')
+            if isinstance(affected, list):
+                for p in affected:
+                    if isinstance(p, dict):
+                        p_order = p.get('order')
+                        p_title = (p.get('title') or '').strip().lower()
+                        p_id = p.get('id')
+                        matched = None
+                        if p_id:
+                            try:
+                                matched = roadmap.phases.filter(id=int(p_id)).first()
+                            except (ValueError, TypeError):
+                                pass
+                        if not matched and p_order:
+                            try:
+                                matched = roadmap.phases.filter(order=int(p_order)).first()
+                            except (ValueError, TypeError):
+                                pass
+                        if not matched and p_title:
+                            matched = roadmap.phases.filter(title__iexact=p_title).first()
+                        if matched:
+                            p['id'] = matched.id
+                            p['target_phase_id'] = matched.id
+                            p['order'] = matched.order
+
+        return data
+
+    @classmethod
+    def _is_explanation_request(cls, prompt_text: str):
+        text = (prompt_text or "").strip().lower()
+        explanation_prefixes = (
+            'what ', 'why ', 'how ', 'explain', 'describe', 'tell me',
+            'recommend', 'suggest', 'what is', 'what are', 'pros and cons',
+            'compare', 'is it better', 'which tech', 'which database'
+        )
+        if any(text.startswith(p) for p in explanation_prefixes) and not any(kw in text for kw in ['instead of', 'replace', 'remove', 'add task', 'add phase', 'delete phase', 'change to']):
+            return True
+        return False
+
+    @classmethod
+    def _is_ambiguous_request(cls, prompt_text: str):
+        text = (prompt_text or "").strip().lower()
+        ambiguous_exacts = [
+            'change database', 'change the database', 'switch database',
+            'change tech stack', 'change the tech stack', 'update tech stack',
+            'change framework', 'change architecture', 'optimize', 'improve',
+            'update deployment', 'change hosting', 'modify roadmap'
+        ]
+        if text in ambiguous_exacts:
+            return True
+        if (text.startswith('change ') or text.startswith('update ') or text.startswith('switch ')) and len(text.split()) <= 3:
+            if not any(kw in text for kw in ['to', 'with', 'instead', 'phase', 'task', 'add', 'remove']):
+                return True
+        return False
+
+    @classmethod
+    def _extract_technology_migration(cls, prompt_text: str = "", current_tech_stack: str = "", new_tech_stack: str = "", change_summary: str = ""):
+        search_texts = [t.strip() for t in [prompt_text, change_summary] if t and t.strip()]
+
+        patterns = [
+            (r'(?i)(?:use|switch to|migrate to|change to|adopt)\s+([A-Za-z0-9_.+/# -]+?)\s+(?:instead of|rather than|in place of)\s+([A-Za-z0-9_.+/# -]+)', False),
+            (r'(?i)(?:replace|remove|swap|drop)\s+([A-Za-z0-9_.+/# -]+?)\s+(?:with|by|and use)\s+([A-Za-z0-9_.+/# -]+)', True),
+            (r'(?i)(?:switch|migrate|move)\s+from\s+([A-Za-z0-9_.+/# -]+?)\s+to\s+([A-Za-z0-9_.+/# -]+)', True),
+        ]
+
+        old_tech = ""
+        new_tech = ""
+
+        for text in search_texts:
+            for pat, is_old_first in patterns:
+                m = re.search(pat, text)
+                if m:
+                    first = m.group(1).strip()
+                    second = m.group(2).strip()
+                    first = re.split(r'\s+(?:across|throughout|in|for|before|after|\.)\s*', first, flags=re.I)[0].strip()
+                    second = re.split(r'\s+(?:across|throughout|in|for|before|after|\.)\s*', second, flags=re.I)[0].strip()
+                    if is_old_first:
+                        old_tech, new_tech = first, second
+                    else:
+                        new_tech, old_tech = first, second
+                    break
+            if old_tech and new_tech:
+                break
+
+        if (not old_tech or not new_tech) and current_tech_stack and new_tech_stack and current_tech_stack != new_tech_stack:
+            curr_parts = [p.strip() for p in re.split(r'[,/|;]+', current_tech_stack) if p.strip()]
+            new_parts = [p.strip() for p in re.split(r'[,/|;]+', new_tech_stack) if p.strip()]
+            removed = [p for p in curr_parts if not any(p.lower() == np.lower() for np in new_parts)]
+            added = [p for p in new_parts if not any(p.lower() == cp.lower() for cp in curr_parts)]
+            if removed and added:
+                old_tech = removed[0]
+                new_tech = " & ".join(added)
+
+        old_tech = re.sub(r'^(?:the|an|a)\s+', '', old_tech, flags=re.IGNORECASE).strip().rstrip('.,;')
+        new_tech = re.sub(r'^(?:the|an|a)\s+', '', new_tech, flags=re.IGNORECASE).strip().rstrip('.,;')
+        if old_tech and new_tech and old_tech.lower() != new_tech.lower():
+            return old_tech, new_tech
+        return "", ""
+
+    @classmethod
+    def _sanitize_phase_data_structure(cls, phase_dict):
+        if not isinstance(phase_dict, dict):
+            return phase_dict
+        milestones = phase_dict.get('milestones', [])
+        clean_milestones = []
+        for m_idx, m in enumerate(milestones, start=1):
+            if not isinstance(m, dict):
+                continue
+            seen_titles = set()
+            clean_tasks = []
+            for t_idx, t in enumerate(m.get('tasks', []), start=1):
+                if not isinstance(t, dict):
+                    continue
+                norm_title = (t.get('title') or '').strip().lower()
+                if not norm_title or norm_title in seen_titles:
+                    continue
+                seen_titles.add(norm_title)
+                t_copy = dict(t)
+                t_copy['order'] = len(clean_tasks) + 1
+                clean_tasks.append(t_copy)
+            if clean_tasks:
+                m_copy = dict(m)
+                m_copy['order'] = len(clean_milestones) + 1
+                m_copy['tasks'] = clean_tasks
+                clean_milestones.append(m_copy)
+        phase_dict['milestones'] = clean_milestones
+        return phase_dict
+
+    @classmethod
+    def _apply_generic_roadmap_intent(cls, roadmap, data, prompt_text="", current_tech_stack=""):
+        if not isinstance(data, dict):
+            return data
+
+        if cls._is_explanation_request(prompt_text):
+            data['action'] = 'none'
+            data['operation'] = 'explanation'
+            data['phase_data'] = None
+            data['affected_phases'] = None
+            data['target_phase_id'] = None
+            data['target_phase_order'] = None
+            return data
+
+        if cls._is_ambiguous_request(prompt_text):
+            data['action'] = 'none'
+            data['operation'] = 'clarification'
+            data['phase_data'] = None
+            data['affected_phases'] = None
+            data['target_phase_id'] = None
+            data['target_phase_order'] = None
+            if not data.get('explanation') or '?' not in data.get('explanation', '') or 'clarif' not in data.get('explanation', '').lower():
+                data['explanation'] = "Could you please clarify your request by specifying the exact technology, phase, or tasks you would like to modify?"
+            return data
+
+        old_tech, new_tech = cls._extract_technology_migration(
+            prompt_text=prompt_text,
+            current_tech_stack=current_tech_stack,
+            new_tech_stack=data.get('new_tech_stack', ''),
+            change_summary=data.get('change_summary', '')
+        )
+
+        if old_tech and new_tech:
+            old_tokens = [old_tech]
+            cleaned_sub = re.sub(r'^(?:AWS|GCP|Azure)\s+', '', old_tech, flags=re.IGNORECASE).strip()
+            if cleaned_sub and cleaned_sub.lower() != old_tech.lower() and len(cleaned_sub) >= 2:
+                old_tokens.append(cleaned_sub)
+
+            token_patterns = [re.compile(rf'\b{re.escape(tok)}\b', re.IGNORECASE) for tok in old_tokens]
+
+            data['action'] = 'update_roadmap'
+            data['operation'] = 'update_roadmap'
+            if not data.get('changed_fields'):
+                data['changed_fields'] = ['tech_stack', 'phases.tasks', 'phases.description']
+            if not data.get('reason'):
+                data['reason'] = f"Migrate architecture from {old_tech} to {new_tech}"
+
+            affected = data.get('affected_phases')
+            if not isinstance(affected, list):
+                affected = []
+                if data.get('phase_data'):
+                    p_copy = dict(data['phase_data'])
+                    if data.get('target_phase_order'):
+                        p_copy['order'] = data['target_phase_order']
+                    if data.get('target_phase_id'):
+                        p_copy['id'] = data['target_phase_id']
+                    affected.append(p_copy)
+                data['affected_phases'] = affected
+
+            def _clean_text(val):
+                if not isinstance(val, str):
+                    return val
+                res = val
+                for pat in token_patterns:
+                    res = pat.sub(new_tech, res)
+                return res
+
+            for ap in affected:
+                if isinstance(ap, dict):
+                    ap['title'] = _clean_text(ap.get('title', ''))
+                    ap['description'] = _clean_text(ap.get('description', ''))
+                    for m in ap.get('milestones', []):
+                        if isinstance(m, dict):
+                            m['title'] = _clean_text(m.get('title', ''))
+                            m['description'] = _clean_text(m.get('description', ''))
+                            for t in m.get('tasks', []):
+                                if isinstance(t, dict):
+                                    t['title'] = _clean_text(t.get('title', ''))
+                                    t['description'] = _clean_text(t.get('description', ''))
+
+            affected_orders = {p.get('order') for p in affected if isinstance(p, dict) and p.get('order')}
+            affected_ids = {p.get('id') for p in affected if isinstance(p, dict) and p.get('id')}
+
+            for phase in roadmap.phases.all().order_by('order'):
+                if phase.order in affected_orders or phase.id in affected_ids:
+                    continue
+
+                phase_full_text = f"{phase.title} {phase.description} " + " ".join([
+                    f"{m.title} {m.description} " + " ".join([f"{t.title} {t.description}" for t in m.tasks.all()])
+                    for m in phase.milestones.all()
+                ])
+
+                has_match = any(pat.search(phase_full_text) for pat in token_patterns)
+                if has_match:
+                    p_item = {
+                        'id': phase.id,
+                        'target_phase_id': phase.id,
+                        'order': phase.order,
+                        'title': _clean_text(phase.title),
+                        'description': _clean_text(phase.description),
+                        'duration': phase.duration,
+                        'milestones': [],
+                    }
+                    for m in phase.milestones.all().order_by('order'):
+                        m_item = {
+                            'id': m.id,
+                            'title': _clean_text(m.title),
+                            'description': _clean_text(m.description),
+                            'order': m.order,
+                            'tasks': [],
+                        }
+                        for t in m.tasks.all().order_by('order'):
+                            m_item['tasks'].append({
+                                'id': t.id,
+                                'title': _clean_text(t.title),
+                                'description': _clean_text(t.description),
+                                'order': t.order,
+                            })
+                        p_item['milestones'].append(m_item)
+                    affected.append(p_item)
+
+            affected.sort(key=lambda x: x.get('order', 1))
+            data['affected_phases'] = [cls._sanitize_phase_data_structure(p) for p in affected]
+
+            if not data.get('change_summary'):
+                data['change_summary'] = f"Migrated from {old_tech} to {new_tech} across all affected roadmap phases."
+
+            if not data.get('new_tech_stack') and current_tech_stack:
+                data['new_tech_stack'] = _clean_text(current_tech_stack)
+
+            return data
+
+        removal_match = re.search(r'(?i)\b(?:remove|delete|drop|eliminate)\s+([A-Za-z0-9_.+/# -]+?)(?:\s+(?:from|in|across|throughout)\b|$|\.)', prompt_text)
+        if removal_match and not re.search(r'(?i)\bphase\s*\d*\b', prompt_text):
+            raw_target = removal_match.group(1).strip()
+            raw_target = re.sub(r'^(?:the|all|a|an)\s+', '', raw_target, flags=re.I).strip()
+            clean_tok = re.sub(r'\s+(?:payments?|auth|tasks?|features?|integrations?|services?|brokers?|databases?|systems?|gateways?)$', '', raw_target, flags=re.I).strip()
+            search_terms = []
+            if clean_tok and len(clean_tok) >= 3 and clean_tok.lower() not in ['phase', 'milestone', 'task', 'step', 'roadmap', 'the', 'all', 'user', 'app']:
+                search_terms.append(clean_tok)
+            if raw_target and raw_target not in search_terms and len(raw_target) >= 3 and raw_target.lower() not in ['phase', 'milestone', 'task', 'step', 'roadmap', 'the', 'all', 'user', 'app']:
+                search_terms.append(raw_target)
+            first_word = raw_target.split()[0]
+            if len(first_word) >= 3 and first_word.lower() not in ['phase', 'milestone', 'task', 'step', 'roadmap', 'the', 'all', 'user', 'app'] and first_word not in search_terms:
+                search_terms.append(first_word)
+
+            if search_terms:
+                rem_pat = re.compile(rf'\b(?:{"|".join(re.escape(t) for t in search_terms)})\b', re.IGNORECASE)
+                affected = data.get('affected_phases') or []
+                affected_ids = {p.get('id') for p in affected if isinstance(p, dict) and p.get('id')}
+                affected_orders = {p.get('order') for p in affected if isinstance(p, dict) and p.get('order')}
+
+                for phase in roadmap.phases.all().order_by('order'):
+                    phase_text = f"{phase.title} {phase.description} " + " ".join([
+                        f"{m.title} {m.description} " + " ".join([f"{t.title} {t.description}" for t in m.tasks.all()])
+                        for m in phase.milestones.all()
+                    ])
+                    if rem_pat.search(phase_text):
+                        if phase.id in affected_ids or phase.order in affected_orders:
+                            continue
+                        clean_ms = []
+                        for m in phase.milestones.all().order_by('order'):
+                            clean_ts = []
+                            for t in m.tasks.all().order_by('order'):
+                                if not rem_pat.search(f"{t.title} {t.description}"):
+                                    clean_ts.append({
+                                        'id': t.id,
+                                        'title': t.title,
+                                        'description': t.description,
+                                        'order': len(clean_ts) + 1,
+                                    })
+                            if clean_ts:
+                                clean_ms.append({
+                                    'id': m.id,
+                                    'title': rem_pat.sub('', m.title).strip() or m.title,
+                                    'description': rem_pat.sub('', m.description).strip() or m.description,
+                                    'order': len(clean_ms) + 1,
+                                    'tasks': clean_ts,
+                                })
+                        affected.append({
+                            'id': phase.id,
+                            'target_phase_id': phase.id,
+                            'order': phase.order,
+                            'title': rem_pat.sub('', phase.title).strip() or phase.title,
+                            'description': rem_pat.sub('', phase.description).strip() or phase.description,
+                            'duration': phase.duration,
+                            'milestones': clean_ms,
+                        })
+
+                if affected:
+                    affected.sort(key=lambda x: x.get('order', 1))
+                    data['action'] = 'update_roadmap'
+                    data['operation'] = 'update_roadmap'
+                    data['affected_phases'] = [cls._sanitize_phase_data_structure(p) for p in affected]
+                    data['changed_fields'] = ['phases.tasks', 'phases.milestones']
+                    data['reason'] = f"Remove {raw_target} and all dependent tasks across the complete roadmap"
+                    data['change_summary'] = f"Removed {raw_target} and dependent setup, integration, and testing tasks from all affected phases."
+                    data['explanation'] = f"I evaluated the complete roadmap for removing '{raw_target}'. I identified and removed dependent tasks across affected phases (from setup through testing/deployment) to keep the implementation flow logical without contradictory tasks."
+                    return data
+
+        is_explicit_add_phase = bool(re.search(r'(?i)\b(?:add|create|insert|new)\s+(?:a\s+)?phase\b', prompt_text))
+        if data.get('action') == 'add_phase' and not is_explicit_add_phase:
+            phase_to_merge = data.get('phase_data') or {}
+            target_phase = None
+            if data.get('target_phase_id'):
+                target_phase = roadmap.phases.filter(id=data['target_phase_id']).first()
+            if not target_phase and data.get('target_phase_order'):
+                target_phase = roadmap.phases.filter(order=data['target_phase_order']).first()
+            if not target_phase:
+                target_phase = roadmap.phases.filter(order=2).first() or roadmap.phases.first()
+            if target_phase and phase_to_merge:
+                merged_milestones = []
+                for m in target_phase.milestones.all().order_by('order'):
+                    merged_milestones.append({
+                        'id': m.id,
+                        'title': m.title,
+                        'description': m.description,
+                        'order': m.order,
+                        'tasks': [{'id': t.id, 'title': t.title, 'description': t.description, 'order': t.order} for t in m.tasks.all().order_by('order')]
+                    })
+                for new_m in phase_to_merge.get('milestones', []):
+                    merged_milestones.append(new_m)
+                data['action'] = 'edit_phase'
+                data['operation'] = 'add_task'
+                data['target_phase_id'] = target_phase.id
+                data['target_phase_order'] = target_phase.order
+                data['phase_data'] = {
+                    'id': target_phase.id,
+                    'order': target_phase.order,
+                    'title': target_phase.title,
+                    'description': target_phase.description,
+                    'duration': target_phase.duration,
+                    'milestones': merged_milestones,
+                }
+
+        if data.get('phase_data'):
+            data['phase_data'] = cls._sanitize_phase_data_structure(data['phase_data'])
+
+        if data.get('affected_phases'):
+            data['affected_phases'] = [cls._sanitize_phase_data_structure(p) for p in data['affected_phases']]
+            for p in data['affected_phases']:
+                if isinstance(p, dict):
+                    matched = None
+                    if p.get('id'):
+                        try:
+                            matched = roadmap.phases.filter(id=int(p['id'])).first()
+                        except (ValueError, TypeError):
+                            pass
+                    if not matched and p.get('order'):
+                        try:
+                            matched = roadmap.phases.filter(order=int(p['order'])).first()
+                        except (ValueError, TypeError):
+                            pass
+                    if not matched and p.get('title'):
+                        matched = roadmap.phases.filter(title__iexact=p['title'].strip()).first()
+                    if matched:
+                        p['id'] = matched.id
+                        p['order'] = matched.order
+                        p['target_phase_id'] = matched.id
+
+            data['affected_phases'].sort(key=lambda x: x.get('order', 1))
+            if len(data['affected_phases']) > 1:
+                data['action'] = 'update_roadmap'
+                data['operation'] = 'update_roadmap'
 
         return data
 
@@ -799,7 +1308,7 @@ class RoadmapCopilotService:
             completed_in_phase = [t.title for t in phase_tasks if t.id in completed_task_set]
             pending_in_phase = [t.title for t in phase_tasks if t.id not in completed_task_set]
             active_phase_context = (
-                f"\nCurrently Pinned / Active Phase in View:\n"
+                f"\nContext Phase (Currently Focused in UI):\n"
                 f"- Phase ID: {active_phase.id}\n"
                 f"- Phase Number (Order): {active_phase.order}\n"
                 f"- Phase Title: {active_phase.title}\n"
@@ -807,7 +1316,12 @@ class RoadmapCopilotService:
                 f"- Phase Duration: {active_phase.duration}\n"
                 f"- Completed Tasks in this Phase ({len(completed_in_phase)}/{len(phase_tasks)}): {completed_in_phase}\n"
                 f"- Pending Tasks in this Phase: {pending_in_phase}\n"
-                f"When the user refers to 'this phase', 'current phase', or asks to customize or modify tasks in the active phase, focus on this pinned phase (target_phase_id={active_phase.id}, target_phase_order={active_phase.order}).\n"
+                f"Complete Roadmap Analysis Mandate: Even though Phase {active_phase.order} ('{active_phase.title}') is focused, check EVERY add, edit, or delete request against the COMPLETE roadmap from setup through deployment. Identify where the change belongs and whether it affects other phases. Suggest any necessary additions, edits, removals, or reordering to keep the implementation flow logical. When multiple phases are affected, use action='update_roadmap' and include all affected phases in affected_phases.\n"
+            )
+        else:
+            active_phase_context = (
+                f"\nScope: 'All Phases' (Complete Roadmap Scope).\n"
+                f"Scope Rule: Analyze all phases from top to bottom (Phase 1 through final phase) in roadmap dependency order. Identify relevant additions, edits, or deletions across the roadmap. Propose changes in roadmap order using action='update_roadmap' or 'update_tech_stack' (or 'add_phase' / 'delete_phase'). Preserve all unaffected phases, their IDs, order, and completed task statuses.\n"
             )
 
         system_instruction = (
@@ -822,21 +1336,27 @@ class RoadmapCopilotService:
             f"Active Phases ({len(phases_summary)} total):\n"
             f"{json.dumps(phases_summary, indent=2)}\n"
             f"{active_phase_context}\n"
-            f"Rules and capabilities:\n"
-            f"1. Conversational explanation & advice: In the 'explanation' field, provide an insightful, direct, and well-structured answer using markdown headings, clean bullet points, and comparison tables when evaluating options. When users ask questions like 'What tech stack would you recommend?' or inquire about technologies, recommend suitable options specifically fitting '{project.name}', explain why they fit, and detail key trade-offs (e.g. scalability, latency, developer velocity, ACID guarantees, complexity). Never force a suggestion. Ask focused questions, one at a time, when requirements are unclear. When only giving advice without applying roadmap changes, keep action='none'.\n"
-            f"2. Tech Stack Change: When the user requests a tech stack modification (e.g. 'Use PostgreSQL instead of MongoDB', 'Switch backend to FastAPI'):\n"
-            f"   - Set action='update_tech_stack'.\n"
-            f"   - Set new_tech_stack to the updated, complete tech stack string.\n"
-            f"   - Set change_summary to a concise summary explaining the migration, trade-offs, and affected phases.\n"
-            f"   - Populate affected_phases with the complete revised list of all roadmap phases. Update every affected phase, task, dependency, duration, and technical description to match the new stack (do not leave obsolete technologies behind).\n"
-            f"   - Completed task preservation: If any affected task was already completed (is_completed: true), preserve it if still valid, or clearly explain the impact in impact_on_completed_tasks before replacing it.\n"
-            f"3. Feature or Phase Change: When the user requests a new feature (e.g. 'Add image sharing to chat', 'Add Stripe billing') or edits a phase:\n"
-            f"   - If modifying a single phase, set action='edit_phase' with phase_data, target_phase_id, and change_summary.\n"
-            f"   - If the feature impacts multiple phases (e.g. adds core logic in Phase 2, storage in Phase 3, and testing in Phase 4), set action='update_roadmap', populate change_summary, and supply the revised phases in affected_phases.\n"
-            f"   - Never just append tasks at the very end or leave outdated deliverables behind.\n"
-            f"4. Add / Delete Phase: For adding a single new phase, set action='add_phase' with phase_data (placing feature phases before deployment/polish). For deleting, set action='delete_phase' with target_phase_id/target_phase_order.\n"
-            f"5. Mandatory Descriptions: Every phase, milestone, and task MUST have a technical, actionable description. Never leave descriptions empty.\n"
-            f"Return strictly JSON conforming to RoadmapCopilotResponse schema."
+            f"Instructions:\n"
+            f"1. Complete Roadmap Lifecycle Analysis:\n"
+            f"   - Check EVERY add, edit, or delete request against the COMPLETE roadmap from start to finish (foundation, features, integrations, testing, deployment).\n"
+            f"   - Identify where the change belongs and whether it affects other phases.\n"
+            f"   - When a feature or technology is removed, find and update or remove all tasks that depend on it across ALL phases.\n"
+            f"   - When a feature is edited, revise its affected tasks and any dependent later work.\n"
+            f"   - Suggest necessary additions, edits, removals, or reordering to keep the implementation flow logical from setup through deployment.\n"
+            f"   - Do NOT automatically add a new phase or leave outdated, duplicate, or contradictory tasks behind. Integrate changes into existing logical phases where possible.\n"
+            f"2. Multi-Phase vs Single-Phase Actions:\n"
+            f"   - If multiple phases are affected or cross-phase changes are needed: action='update_roadmap', operation='update_roadmap', with all affected phases in 'affected_phases'.\n"
+            f"   - If strictly a single phase is affected: action='edit_phase', operation='add_task'/'edit_task'/'remove_task', target_phase_id=exact phase ID, target_phase_order=exact phase order, phase_data=updated phase.\n"
+            f"   - For explicit new phase request only: action='add_phase', operation='add_phase'.\n"
+            f"   - For deleting an entire phase: action='delete_phase', operation='delete_phase', target_phase_id=exact phase ID.\n"
+            f"3. Explanation & Proposal Summary:\n"
+            f"   - In 'explanation', show the user the proposed changes and briefly explain why they are needed to keep the architecture and workflow logical.\n"
+            f"4. Explanation vs Ambiguity:\n"
+            f"   - For advice or questions: action='none', operation='explanation'.\n"
+            f"   - For ambiguous requests: action='none', operation='clarification', ask a focused question.\n"
+            f"5. Completed Tasks Preservation:\n"
+            f"   - Preserve completed task statuses (is_completed: true) for tasks that remain valid. If an affected task is completed and replaced, explain the impact in impact_on_completed_tasks.\n"
+            f"6. Return strictly JSON conforming to RoadmapCopilotResponse schema."
         )
 
         user_content = prompt_text
@@ -855,7 +1375,9 @@ class RoadmapCopilotService:
                     user_content
                 )
                 normalized = cls._normalize_copilot_data(raw_json)
-                validated = RoadmapCopilotResponse.model_validate(normalized)
+                resolved = cls._resolve_target_phase(roadmap, normalized, active_phase=active_phase, prompt_text=prompt_text)
+                propagated = cls._apply_generic_roadmap_intent(roadmap, resolved, prompt_text=prompt_text, current_tech_stack=project.tech_stack)
+                validated = RoadmapCopilotResponse.model_validate(propagated)
                 return validated.model_dump()
             except Exception:
                 pass
@@ -883,7 +1405,9 @@ class RoadmapCopilotService:
                 raw = (response.text or '').strip()
                 cleaned = json.loads(raw)
                 normalized = cls._normalize_copilot_data(cleaned)
-                validated = RoadmapCopilotResponse.model_validate(normalized)
+                resolved = cls._resolve_target_phase(roadmap, normalized, active_phase=active_phase, prompt_text=prompt_text)
+                propagated = cls._apply_generic_roadmap_intent(roadmap, resolved, prompt_text=prompt_text, current_tech_stack=project.tech_stack)
+                validated = RoadmapCopilotResponse.model_validate(propagated)
                 return validated.model_dump()
             except Exception:
                 continue
