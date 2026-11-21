@@ -44,33 +44,23 @@ function renderInlineTokens(text: string, isDark: boolean, isUser: boolean = fal
   return tokens.map((token, tIdx) => {
     if (token.startsWith('**') && token.endsWith('**')) {
       const boldContent = token.slice(2, -2);
-      if (inTable) {
-        return (
-          <strong
-            key={tIdx}
-            className={`font-semibold ${
-              isDark ? 'text-amber-300' : 'text-stone-950 font-bold'
-            }`}
-          >
-            {boldContent}
-          </strong>
-        );
-      }
       return (
-        <span
+        <strong
           key={tIdx}
-          className={`inline-block px-1.5 py-0.5 rounded font-bold mx-0.5 ${
+          className={`font-semibold ${
             isUser
+              ? 'text-white'
+              : inTable
               ? isDark
-                ? 'bg-black/30 text-white'
-                : 'bg-white/20 text-white'
+                ? 'text-amber-300'
+                : 'text-stone-950 font-bold'
               : isDark
-              ? 'bg-[#FFC900]/20 text-[#FFD84D] border-b-2 border-[#FFC900]'
-              : 'bg-[#FFC900]/30 text-[#6B4E00] border-b-2 border-[#D9A300]'
+              ? 'text-amber-300'
+              : 'text-stone-950'
           }`}
         >
           {boldContent}
-        </span>
+        </strong>
       );
     }
     if (token.startsWith('`') && token.endsWith('`')) {
@@ -185,8 +175,15 @@ function parseMessageBlocks(text: string): MessageBlock[] {
       while (i < lines.length) {
         const lineTrimmed = lines[i].trim();
         if (!lineTrimmed) {
-          if (i + 1 < lines.length && (/^\d+\.\s+/.test(lines[i + 1].trim()) || /^[-*•]\s+/.test(lines[i + 1].trim()))) {
-            i++;
+          let nextNonEmpty = i + 1;
+          while (nextNonEmpty < lines.length && !lines[nextNonEmpty].trim()) {
+            nextNonEmpty++;
+          }
+          if (
+            nextNonEmpty < lines.length &&
+            (/^\d+\.\s+/.test(lines[nextNonEmpty].trim()) || /^[-*•]\s+/.test(lines[nextNonEmpty].trim()))
+          ) {
+            i = nextNonEmpty;
             continue;
           } else {
             break;
@@ -201,8 +198,12 @@ function parseMessageBlocks(text: string): MessageBlock[] {
           while (i < lines.length) {
             const subTrimmed = lines[i].trim();
             if (!subTrimmed) {
-              if (i + 1 < lines.length && /^[-*•]\s+/.test(lines[i + 1].trim())) {
-                i++;
+              let nextSub = i + 1;
+              while (nextSub < lines.length && !lines[nextSub].trim()) {
+                nextSub++;
+              }
+              if (nextSub < lines.length && /^[-*•]\s+/.test(lines[nextSub].trim())) {
+                i = nextSub;
                 continue;
               } else {
                 break;
@@ -228,7 +229,34 @@ function parseMessageBlocks(text: string): MessageBlock[] {
     i++;
   }
 
-  return blocks;
+  const mergedBlocks: MessageBlock[] = [];
+  for (const block of blocks) {
+    if (block.type === 'list' && block.ordered && mergedBlocks.length > 0) {
+      const lastBlock = mergedBlocks[mergedBlocks.length - 1];
+      if (lastBlock.type === 'list' && lastBlock.ordered) {
+        lastBlock.items.push(...block.items);
+        continue;
+      }
+      if (
+        lastBlock.type === 'space' &&
+        mergedBlocks.length > 1 &&
+        mergedBlocks[mergedBlocks.length - 2].type === 'list' &&
+        (mergedBlocks[mergedBlocks.length - 2] as { type: 'list'; items: ListItem[]; ordered: boolean }).ordered
+      ) {
+        mergedBlocks.pop();
+        const prevList = mergedBlocks[mergedBlocks.length - 1] as {
+          type: 'list';
+          items: ListItem[];
+          ordered: boolean;
+        };
+        prevList.items.push(...block.items);
+        continue;
+      }
+    }
+    mergedBlocks.push(block);
+  }
+
+  return mergedBlocks;
 }
 
 function renderFormattedMessage(text: string, isDark: boolean, isUser: boolean = false) {
@@ -319,7 +347,7 @@ function renderFormattedMessage(text: string, isDark: boolean, isUser: boolean =
                   <div className="flex items-start gap-2 text-[13.5px] leading-relaxed">
                     {block.ordered ? (
                       <span className="font-mono text-xs font-semibold text-[#FFC900] mt-0.5 shrink-0">
-                        {item.num ?? itemIdx + 1}.
+                        {itemIdx + 1}.
                       </span>
                     ) : (
                       <span className="text-[#FFC900] font-bold text-xs mt-1 shrink-0">•</span>
@@ -570,14 +598,14 @@ export function RoadmapCopilotDrawer({
   if (!isOpen) return null;
 
   const quickPrompts = [
-    'Recommend optimal tech stack',
-    'Use PostgreSQL instead of MongoDB',
-    'Add image sharing to chat',
     'Explain roadmap architecture & phases',
+    'Analyze dependencies & potential risks',
+    'Add test automation & CI/CD pipeline',
+    'Recommend optimal tech stack',
     ...(selectedScopePhase
-      ? [`Ask about Phase 0${selectedScopePhase.order}: ${selectedScopePhase.title}`]
+      ? [`Explain Phase 0${selectedScopePhase.order}: ${selectedScopePhase.title}`]
       : activePhase
-      ? [`Ask about Phase 0${activePhase.order}: ${activePhase.title}`]
+      ? [`Explain Phase 0${activePhase.order}: ${activePhase.title}`]
       : []),
   ];
 

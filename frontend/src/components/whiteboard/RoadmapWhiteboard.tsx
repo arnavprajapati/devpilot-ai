@@ -23,9 +23,10 @@ import { useTheme } from '../../context/ThemeContext';
 interface RoadmapWhiteboardProps {
   projectId: number;
   roadmap: Roadmap;
+  onCanvasClick?: () => void;
 }
 
-export function RoadmapWhiteboard({ projectId, roadmap }: RoadmapWhiteboardProps) {
+export function RoadmapWhiteboard({ projectId, roadmap, onCanvasClick }: RoadmapWhiteboardProps) {
   const { theme } = useTheme();
   const isDark = theme === 'dark';
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
@@ -471,6 +472,7 @@ export function RoadmapWhiteboard({ projectId, roadmap }: RoadmapWhiteboardProps
           <ReactFlow
             nodes={visibleNodes}
             edges={visibleEdges}
+            onPaneClick={onCanvasClick}
             onNodesChange={handleNodesChangeWrapped}
             onEdgesChange={handleEdgesChangeWrapped}
             onNodeDragStart={onNodeDragStart}

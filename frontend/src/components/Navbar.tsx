@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import type { MouseEvent } from 'react';
 import { Menu, X, ArrowRight, LayoutDashboard, LogOut, Sun, Moon } from 'lucide-react';
 import { Logo } from './Logo';
@@ -21,9 +21,24 @@ interface NavbarProps {
 
 export function Navbar({ onNavigate, currentView = 'landing' }: NavbarProps) {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const mobileNavRef = useRef<HTMLElement>(null);
   const { isAuthenticated, logout } = useAuth();
   const { theme, toggleTheme } = useTheme();
   const isDark = theme === 'dark';
+
+  useEffect(() => {
+    function handleClickOutside(event: globalThis.MouseEvent) {
+      if (
+        mobileMenuOpen &&
+        mobileNavRef.current &&
+        !mobileNavRef.current.contains(event.target as Node)
+      ) {
+        setMobileMenuOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [mobileMenuOpen]);
 
   const handleNavLinkClick = (e: MouseEvent<HTMLAnchorElement>, href: string) => {
     if (currentView === 'dashboard') {
@@ -41,6 +56,7 @@ export function Navbar({ onNavigate, currentView = 'landing' }: NavbarProps) {
 
   return (
     <header
+      ref={mobileNavRef}
       className={`w-full z-50 transition-colors duration-300 font-['Plus_Jakarta_Sans',sans-serif] bg-transparent ${
         currentView === 'dashboard' ? 'relative' : 'absolute top-0 inset-x-0'
       } ${isDark ? 'text-[#F5F3EF]' : 'text-[#171717]'}`}

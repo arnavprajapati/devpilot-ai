@@ -12,6 +12,8 @@ import {
   RotateCcw,
   Workflow,
   Database,
+  ChevronUp,
+  ChevronDown,
 } from 'lucide-react';
 import { RoadmapWhiteboard } from '../components/whiteboard/RoadmapWhiteboard';
 import { DatabaseSchemaCanvas } from '../components/database-schema/DatabaseSchemaCanvas';
@@ -65,6 +67,7 @@ export function DashboardView({ onNavigate }: DashboardViewProps) {
   const [expandedPhases, setExpandedPhases] = useState<Record<number, boolean>>({});
   const dbRegenerateRef = useRef<(() => void) | null>(null);
   const [isDatabaseGenerating, setIsDatabaseGenerating] = useState(false);
+  const [isHeaderCollapsed, setIsHeaderCollapsed] = useState(false);
 
   const togglePhaseExpanded = (phaseId: number) => {
     setExpandedPhases((prev) => ({ ...prev, [phaseId]: !prev[phaseId] }));
@@ -217,6 +220,7 @@ export function DashboardView({ onNavigate }: DashboardViewProps) {
     setRoadmap(null);
     setRoadmapError(null);
     setConfirmRegenerateOpen(false);
+    setIsHeaderCollapsed(false);
   };
 
   const addTechTag = (tech: string) => {
@@ -628,8 +632,33 @@ export function DashboardView({ onNavigate }: DashboardViewProps) {
             isDark ? 'bg-[#08090B] text-[#F5F3EF]' : 'bg-[#F7F3EA] text-[#171717]'
           }`}
         >
+          {isHeaderCollapsed && (
+            <div className="absolute top-2.5 left-1/2 -translate-x-1/2 z-50 animate-in fade-in slide-in-from-top-2 duration-200">
+              <button
+                type="button"
+                onClick={() => setIsHeaderCollapsed(false)}
+                title="Expand header & navigation"
+                className={`px-3 py-1.5 rounded-full border shadow-xl flex items-center gap-1.5 text-xs font-semibold transition-all hover:scale-105 cursor-pointer backdrop-blur-md ${
+                  isDark
+                    ? 'bg-[#18191D]/90 border-[#FFC900]/40 text-[#F5F3EF] hover:border-[#FFC900]'
+                    : 'bg-white/95 border-[#E8E1D5] text-[#171717] hover:border-[#D9A300]'
+                }`}
+              >
+                <ChevronDown className="w-3.5 h-3.5 text-[#FFC900]" />
+                <span>Show Header</span>
+                <span className="text-[11px] opacity-60 ml-0.5 max-w-[140px] truncate hidden sm:inline">
+                  ({selectedProject.name})
+                </span>
+              </button>
+            </div>
+          )}
+
           <header
-            className={`h-16 sm:h-18 shrink-0 border-b px-5 sm:px-8 flex items-center justify-between font-['Plus_Jakarta_Sans',sans-serif] ${
+            className={`transition-all duration-300 ease-in-out shrink-0 border-b px-5 sm:px-8 flex items-center justify-between font-['Plus_Jakarta_Sans',sans-serif] ${
+              isHeaderCollapsed
+                ? '-mt-20 opacity-0 pointer-events-none h-0 py-0 border-b-0 overflow-hidden'
+                : 'h-16 sm:h-18 opacity-100'
+            } ${
               isDark
                 ? 'bg-[#08090B] border-[#242321]'
                 : 'bg-[#FFFFFF] border-[#E8E1D5]'
@@ -811,6 +840,20 @@ export function DashboardView({ onNavigate }: DashboardViewProps) {
 
               <button
                 type="button"
+                onClick={() => setIsHeaderCollapsed(true)}
+                title="Collapse header for full screen canvas"
+                className={`px-2.5 py-1.5 rounded-lg border transition-colors cursor-pointer flex items-center gap-1.5 text-xs font-semibold tracking-tight ${
+                  isDark
+                    ? 'border-[#242321] text-[#A6A4A0] hover:text-[#F5F3EF] hover:border-[#FFC900]/50 bg-[#18191D]'
+                    : 'border-[#E8E1D5] text-[#6B665E] hover:text-[#171717] hover:border-[#D9A300]/50 bg-white'
+                }`}
+              >
+                <ChevronUp className="w-3.5 h-3.5 text-[#FFC900]" />
+                <span className="hidden md:inline">Full Screen</span>
+              </button>
+
+              <button
+                type="button"
                 onClick={closeModal}
                 className={`px-3 py-1.5 rounded-lg border transition-colors cursor-pointer flex items-center gap-1.5 text-xs font-semibold tracking-tight ${
                   isDark
@@ -858,7 +901,11 @@ export function DashboardView({ onNavigate }: DashboardViewProps) {
             ) : detailsTab === 'whiteboard' ? (
               <div className="w-full flex-1 flex flex-col min-h-[640px]">
                 {roadmap ? (
-                  <RoadmapWhiteboard projectId={selectedProject.id} roadmap={roadmap} />
+                  <RoadmapWhiteboard
+                    projectId={selectedProject.id}
+                    roadmap={roadmap}
+                    onCanvasClick={() => setIsHeaderCollapsed(true)}
+                  />
                 ) : (
                   <div
                     className={`rounded-3xl border border-dashed p-12 text-center flex flex-col items-center justify-center my-auto mx-auto max-w-md shadow-xs ${
@@ -916,6 +963,7 @@ export function DashboardView({ onNavigate }: DashboardViewProps) {
                   dbRegenerateRef.current = fn;
                 }}
                 onGeneratingChange={setIsDatabaseGenerating}
+                onCanvasClick={() => setIsHeaderCollapsed(true)}
               />
             ) : (
               <ProjectSpecsView

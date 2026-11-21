@@ -25,12 +25,14 @@ interface DatabaseSchemaCanvasProps {
   project: Project;
   onRegisterRegenerate?: (fn: () => void) => void;
   onGeneratingChange?: (generating: boolean) => void;
+  onCanvasClick?: () => void;
 }
 
 export function DatabaseSchemaCanvas({
   project,
   onRegisterRegenerate,
   onGeneratingChange,
+  onCanvasClick,
 }: DatabaseSchemaCanvasProps) {
   const { theme } = useTheme();
   const isDark = theme === 'dark';
@@ -681,6 +683,7 @@ export function DatabaseSchemaCanvas({
             <ReactFlow
               nodes={nodes}
               edges={edges}
+              onPaneClick={onCanvasClick}
               onNodesChange={handleNodesChangeWrapped}
               onEdgesChange={handleEdgesChangeWrapped}
               onNodeDragStart={onNodeDragStart}
