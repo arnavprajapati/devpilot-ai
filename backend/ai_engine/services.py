@@ -37,10 +37,14 @@ class GeneratedRoadmapSchema(BaseModel):
 
 class RoadmapCopilotResponse(BaseModel):
     explanation: str = Field(default="", description="Helpful, conversational explanation of architecture, use cases, and changes.")
-    action: Literal["none", "add_phase", "edit_phase", "delete_phase"] = Field(default="none", description="Action type: none, add_phase, edit_phase, delete_phase")
+    action: Literal["none", "add_phase", "edit_phase", "delete_phase", "update_tech_stack", "update_roadmap"] = Field(default="none", description="Action type: none, add_phase, edit_phase, delete_phase, update_tech_stack, update_roadmap")
     phase_data: Optional[GeneratedPhaseSchema] = Field(default=None, description="New or edited phase details when action is add_phase or edit_phase")
     target_phase_id: Optional[int] = Field(default=None, description="Database ID of target phase being edited or deleted")
     target_phase_order: Optional[int] = Field(default=None, description="Phase order/number of target phase being edited or deleted")
+    new_tech_stack: Optional[str] = Field(default=None, description="Updated tech stack when action is update_tech_stack")
+    affected_phases: Optional[List[GeneratedPhaseSchema]] = Field(default=None, description="List of updated phases when action is update_tech_stack or update_roadmap")
+    change_summary: Optional[str] = Field(default=None, description="Clear summary of proposed changes before user accepts")
+    impact_on_completed_tasks: Optional[str] = Field(default=None, description="Impact explanation on completed tasks")
 
 
 class GeneratedColumnSchema(BaseModel):
@@ -699,23 +703,24 @@ class RoadmapCopilotService:
             data['explanation'] = str(data['message'])
         elif 'explanation' not in data:
             data['explanation'] = 'Here is the requested roadmap architectural proposal.'
-        valid_actions = {'none', 'add_phase', 'edit_phase', 'delete_phase'}
+        valid_actions = {'none', 'add_phase', 'edit_phase', 'delete_phase', 'update_tech_stack', 'update_roadmap'}
         if data.get('action') not in valid_actions:
             data['action'] = 'none'
 
-        phase = data.get('phase_data')
-        if isinstance(phase, dict):
-            if not phase.get('description'):
-                phase_title = phase.get('title', 'Development Phase')
-                phase['description'] = f"Comprehensive architecture and implementation for {phase_title}."
-            if 'order' in phase and phase['order'] is not None:
+        def _norm_single_phase(p, default_idx=None):
+            if not isinstance(p, dict):
+                return p
+            if not p.get('description'):
+                p_title = p.get('title', 'Development Phase')
+                p['description'] = f"Comprehensive architecture and implementation for {p_title}."
+            if 'order' in p and p['order'] is not None:
                 try:
-                    phase['order'] = int(phase['order'])
+                    p['order'] = int(p['order'])
                 except (ValueError, TypeError):
-                    phase['order'] = None
+                    p['order'] = default_idx
             else:
-                phase['order'] = None
-            milestones = phase.get('milestones', [])
+                p['order'] = default_idx
+            milestones = p.get('milestones', [])
             for m_idx, m in enumerate(milestones, start=1):
                 if isinstance(m, dict):
                     m_title = m.get('title') or f"Milestone {m_idx}"
@@ -741,10 +746,21 @@ class RoadmapCopilotService:
                     m['tasks'] = norm_tasks
                     if 'order' not in m:
                         m['order'] = m_idx
+            return p
+
+        phase = data.get('phase_data')
+        if isinstance(phase, dict):
+            data['phase_data'] = _norm_single_phase(phase)
+
+        affected = data.get('affected_phases')
+        if isinstance(affected, list):
+            data['affected_phases'] = [_norm_single_phase(p, idx) for idx, p in enumerate(affected, start=1)]
+
         return data
 
     @classmethod
-    def chat(cls, project, roadmap, prompt_text: str, conversation_history: list = None, active_phase_id: int = None):
+    def chat(cls, project, roadmap, prompt_text: str, conversation_history: list = None, active_phase_id: int = None, completed_task_ids: list = None):
+        completed_task_set = set(completed_task_ids or [])
         phases_summary = []
         for phase in roadmap.phases.all().order_by('order'):
             m_list = []
@@ -752,8 +768,10 @@ class RoadmapCopilotService:
                 t_list = []
                 for t in m.tasks.all().order_by('order'):
                     t_list.append({
+                        "id": t.id,
                         "title": t.title,
                         "description": t.description,
+                        "is_completed": t.id in completed_task_set,
                     })
                 m_list.append({
                     "id": m.id,
@@ -777,6 +795,9 @@ class RoadmapCopilotService:
 
         active_phase_context = ""
         if active_phase:
+            phase_tasks = [t for m in active_phase.milestones.all() for t in m.tasks.all()]
+            completed_in_phase = [t.title for t in phase_tasks if t.id in completed_task_set]
+            pending_in_phase = [t.title for t in phase_tasks if t.id not in completed_task_set]
             active_phase_context = (
                 f"\nCurrently Pinned / Active Phase in View:\n"
                 f"- Phase ID: {active_phase.id}\n"
@@ -784,14 +805,16 @@ class RoadmapCopilotService:
                 f"- Phase Title: {active_phase.title}\n"
                 f"- Phase Description: {active_phase.description}\n"
                 f"- Phase Duration: {active_phase.duration}\n"
-                f"When the user refers to 'this phase', 'current phase', or asks to modify/add tasks to the active phase without naming one, focus on this pinned phase (target_phase_id={active_phase.id}, target_phase_order={active_phase.order}).\n"
+                f"- Completed Tasks in this Phase ({len(completed_in_phase)}/{len(phase_tasks)}): {completed_in_phase}\n"
+                f"- Pending Tasks in this Phase: {pending_in_phase}\n"
+                f"When the user refers to 'this phase', 'current phase', or asks to customize or modify tasks in the active phase, focus on this pinned phase (target_phase_id={active_phase.id}, target_phase_order={active_phase.order}).\n"
             )
 
         system_instruction = (
             f"You are the Principal Software Architect and Technical Lead Copilot for DevPilot.\n"
             f"Project: '{project.name}'\n"
             f"Description: {project.description}\n"
-            f"Tech Stack: {project.tech_stack or 'Modern Full-Stack'}\n"
+            f"Current Tech Stack: {project.tech_stack or 'Modern Full-Stack'}\n"
             f"Requirements: {project.requirements or 'Standard production architecture'}\n\n"
             f"Current Roadmap Summary:\n"
             f"Roadmap Title: {roadmap.title}\n"
@@ -800,13 +823,19 @@ class RoadmapCopilotService:
             f"{json.dumps(phases_summary, indent=2)}\n"
             f"{active_phase_context}\n"
             f"Rules and capabilities:\n"
-            f"1. Conversational explanation: In the 'explanation' field, provide an insightful, direct, and well-structured explanation in professional English. Structure your response using clear markdown headings (e.g. '### Overview', '### Key Objectives'), clean bullet points, and modern markdown tables when comparing tools or options. Wrap only key technical terms in double asterisks naturally; in tables, keep cell text clean and readable without excessive asterisks on every single word. Avoid solid walls of unformatted text.\n"
-            f"2. Add Phase: If the user wants to add, insert, or create a new phase (e.g. payments, websockets, notifications, testing, ci/cd, deployment, auth), set action='add_phase'. Populate 'phase_data' with realistic duration, 2-3 key milestones, and 2-3 actionable tasks per milestone tailored to the tech stack.\n"
-            f"   - LOGICAL PLACEMENT & PRESERVATION: Testing, polish, and deployment phases MUST ALWAYS remain at the end of the roadmap. When adding a feature phase, specify 'order' in 'phase_data' so it is logically placed before testing/deployment, and subsequent phases automatically shift forward. Existing phases and architecture must be preserved, never wiped.\n"
-            f"   - MANDATORY DESCRIPTIONS: Every phase MUST have a comprehensive 'description'. Every milestone MUST have a title and a clear 1-sentence 'description'. Every task in 'tasks' MUST have BOTH a concise 'title' AND a specific 1-sentence 'description' explaining the implementation detail (like in existing roadmap phases). Never leave 'description' empty.\n"
-            f"3. Edit Phase: If the user asks to modify an existing phase, set action='edit_phase'. Set 'target_phase_order' or 'target_phase_id' to that phase, and provide the updated 'phase_data' with all milestone and task descriptions filled.\n"
-            f"4. Delete Phase: If the user asks to remove or delete a phase, set action='delete_phase' and set 'target_phase_order' or 'target_phase_id'.\n"
-            f"5. Questions / Chat: If the user is just asking questions or discussing architecture without changing phases, set action='none' and phase_data=None.\n"
+            f"1. Conversational explanation & advice: In the 'explanation' field, provide an insightful, direct, and well-structured answer using markdown headings, clean bullet points, and comparison tables when evaluating options. When users ask questions like 'What tech stack would you recommend?' or inquire about technologies, recommend suitable options specifically fitting '{project.name}', explain why they fit, and detail key trade-offs (e.g. scalability, latency, developer velocity, ACID guarantees, complexity). Never force a suggestion. Ask focused questions, one at a time, when requirements are unclear. When only giving advice without applying roadmap changes, keep action='none'.\n"
+            f"2. Tech Stack Change: When the user requests a tech stack modification (e.g. 'Use PostgreSQL instead of MongoDB', 'Switch backend to FastAPI'):\n"
+            f"   - Set action='update_tech_stack'.\n"
+            f"   - Set new_tech_stack to the updated, complete tech stack string.\n"
+            f"   - Set change_summary to a concise summary explaining the migration, trade-offs, and affected phases.\n"
+            f"   - Populate affected_phases with the complete revised list of all roadmap phases. Update every affected phase, task, dependency, duration, and technical description to match the new stack (do not leave obsolete technologies behind).\n"
+            f"   - Completed task preservation: If any affected task was already completed (is_completed: true), preserve it if still valid, or clearly explain the impact in impact_on_completed_tasks before replacing it.\n"
+            f"3. Feature or Phase Change: When the user requests a new feature (e.g. 'Add image sharing to chat', 'Add Stripe billing') or edits a phase:\n"
+            f"   - If modifying a single phase, set action='edit_phase' with phase_data, target_phase_id, and change_summary.\n"
+            f"   - If the feature impacts multiple phases (e.g. adds core logic in Phase 2, storage in Phase 3, and testing in Phase 4), set action='update_roadmap', populate change_summary, and supply the revised phases in affected_phases.\n"
+            f"   - Never just append tasks at the very end or leave outdated deliverables behind.\n"
+            f"4. Add / Delete Phase: For adding a single new phase, set action='add_phase' with phase_data (placing feature phases before deployment/polish). For deleting, set action='delete_phase' with target_phase_id/target_phase_order.\n"
+            f"5. Mandatory Descriptions: Every phase, milestone, and task MUST have a technical, actionable description. Never leave descriptions empty.\n"
             f"Return strictly JSON conforming to RoadmapCopilotResponse schema."
         )
 

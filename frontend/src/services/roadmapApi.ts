@@ -42,7 +42,7 @@ export interface RoadmapDetailResponse {
 
 export interface RoadmapCopilotResponse {
   explanation: string;
-  action: 'none' | 'add_phase' | 'edit_phase' | 'delete_phase';
+  action: 'none' | 'add_phase' | 'edit_phase' | 'delete_phase' | 'update_tech_stack' | 'update_roadmap';
   phase_data?: {
     title: string;
     description: string;
@@ -61,6 +61,10 @@ export interface RoadmapCopilotResponse {
   } | null;
   target_phase_id?: number | null;
   target_phase_order?: number | null;
+  new_tech_stack?: string | null;
+  affected_phases?: any[] | null;
+  change_summary?: string | null;
+  impact_on_completed_tasks?: string | null;
 }
 
 export const roadmapApi = {
@@ -77,7 +81,8 @@ export const roadmapApi = {
     projectId: number,
     prompt: string,
     conversationHistory?: { role: string; content: string }[],
-    activePhaseId?: number
+    activePhaseId?: number,
+    completedTaskIds?: number[]
   ) =>
     apiRequest<RoadmapCopilotResponse>(`/api/projects/${projectId}/roadmap/chat/`, {
       method: 'POST',
@@ -85,18 +90,21 @@ export const roadmapApi = {
         prompt,
         conversation_history: conversationHistory,
         active_phase_id: activePhaseId,
+        completed_task_ids: completedTaskIds,
       }),
     }),
   applyPhaseAction: (
     projectId: number,
     payload: {
-      action: 'add_phase' | 'edit_phase' | 'delete_phase';
+      action: 'add_phase' | 'edit_phase' | 'delete_phase' | 'update_tech_stack' | 'update_roadmap';
       phase_data?: any;
       target_phase_id?: number | null;
       target_phase_order?: number | null;
+      new_tech_stack?: string | null;
+      affected_phases?: any[] | null;
     }
   ) =>
-    apiRequest<{ message: string; roadmap: Roadmap }>(
+    apiRequest<{ message: string; roadmap: Roadmap; project?: any }>(
       `/api/projects/${projectId}/roadmap/apply-action/`,
       {
         method: 'POST',

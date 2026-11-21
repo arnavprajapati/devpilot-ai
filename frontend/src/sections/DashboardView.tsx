@@ -847,7 +847,13 @@ export function DashboardView({ onNavigate }: DashboardViewProps) {
                 toggleTaskCompleted={toggleTaskCompleted}
                 expandedPhases={expandedPhases}
                 togglePhaseExpanded={togglePhaseExpanded}
-                onRoadmapUpdated={(updated) => setRoadmap(updated)}
+                onRoadmapUpdated={(updated, updatedProject) => {
+                  setRoadmap(updated);
+                  if (updatedProject) {
+                    setSelectedProject(updatedProject);
+                    setProjects((prev) => prev.map((p) => (p.id === updatedProject.id ? updatedProject : p)));
+                  }
+                }}
               />
             ) : detailsTab === 'whiteboard' ? (
               <div className="w-full flex-1 flex flex-col min-h-[640px]">

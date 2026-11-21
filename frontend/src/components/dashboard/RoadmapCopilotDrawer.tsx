@@ -11,6 +11,9 @@ import {
   User,
   RotateCcw,
   Layers,
+  ArrowRight,
+  AlertTriangle,
+  Cpu,
 } from 'lucide-react';
 import { useTheme } from '../../context/ThemeContext';
 import type { Project } from '../../services/projectsApi';
@@ -31,7 +34,8 @@ interface RoadmapCopilotDrawerProps {
   roadmap: Roadmap | null;
   selectedProject: Project;
   activePhaseId?: number | null;
-  onRoadmapUpdated: (updatedRoadmap: Roadmap) => void;
+  completedTaskIds?: Record<number, boolean>;
+  onRoadmapUpdated: (updatedRoadmap: Roadmap, updatedProject?: Project) => void;
 }
 
 function renderInlineTokens(text: string, isDark: boolean, isUser: boolean = false, inTable: boolean = false) {
@@ -309,6 +313,7 @@ export function RoadmapCopilotDrawer({
   roadmap,
   selectedProject,
   activePhaseId,
+  completedTaskIds,
   onRoadmapUpdated,
 }: RoadmapCopilotDrawerProps) {
   const { theme } = useTheme();
@@ -318,6 +323,7 @@ export function RoadmapCopilotDrawer({
   const [isLoading, setIsLoading] = useState(false);
   const [applyingMessageId, setApplyingMessageId] = useState<string | null>(null);
   const [appliedActionIds, setAppliedActionIds] = useState<Record<string, boolean>>({});
+  const [rejectedActionIds, setRejectedActionIds] = useState<Record<string, boolean>>({});
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const activePhase = roadmap?.phases.find((p) => p.id === activePhaseId);
@@ -328,7 +334,7 @@ export function RoadmapCopilotDrawer({
         {
           id: 'welcome',
           sender: 'assistant',
-          text: `Hello! I am your **DevPilot AI Roadmap Copilot**. I can explain the use cases, technical architecture, and phase breakdown for **${selectedProject.name}**. Feel free to ask questions or prompt me to add, modify, or remove phases.`,
+          text: `Hello! I am your **DevPilot AI Roadmap Copilot**. I can customize your project architecture, advise on and update your tech stack, and adjust any phase or tasks for **${selectedProject.name}**. Feel free to ask questions, request tech stack migrations, or add new features.`,
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         },
       ]);
@@ -369,12 +375,19 @@ export function RoadmapCopilotDrawer({
       content: m.text,
     }));
 
+    const completedIds = completedTaskIds
+      ? Object.keys(completedTaskIds)
+          .filter((id) => completedTaskIds[Number(id)])
+          .map(Number)
+      : [];
+
     try {
       const res = await roadmapApi.chatCopilot(
         selectedProject.id,
         content,
         historyPayload,
-        activePhaseId || undefined
+        activePhaseId || undefined,
+        completedIds
       );
 
       if (res.data) {
@@ -418,10 +431,12 @@ export function RoadmapCopilotDrawer({
         phase_data: copilotRes.phase_data,
         target_phase_id: copilotRes.target_phase_id,
         target_phase_order: copilotRes.target_phase_order,
+        new_tech_stack: copilotRes.new_tech_stack,
+        affected_phases: copilotRes.affected_phases,
       });
 
       if (res.data?.roadmap) {
-        onRoadmapUpdated(res.data.roadmap);
+        onRoadmapUpdated(res.data.roadmap, res.data.project);
         setAppliedActionIds((prev) => ({ ...prev, [msgId]: true }));
         setMessages((prev) => [
           ...prev,
@@ -439,12 +454,16 @@ export function RoadmapCopilotDrawer({
     }
   };
 
+  const handleRejectAction = (msgId: string) => {
+    setRejectedActionIds((prev) => ({ ...prev, [msgId]: true }));
+  };
+
   const handleResetChat = () => {
     setMessages([
       {
         id: 'welcome-reset',
         sender: 'assistant',
-        text: `Chat reset. Feel free to ask questions about **${selectedProject.name}** or prompt me to add, edit, or remove phases.`,
+        text: `Chat reset. Feel free to ask questions about **${selectedProject.name}** or prompt me to customize the tech stack or phases.`,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       },
     ]);
@@ -453,11 +472,11 @@ export function RoadmapCopilotDrawer({
   if (!isOpen) return null;
 
   const quickPrompts = [
+    'Recommend optimal tech stack',
+    'Use PostgreSQL instead of MongoDB',
+    'Add image sharing to chat',
     'Explain roadmap architecture & phases',
-    'Add Phase: Real-time WebSockets & Alerts',
-    'Add Phase: Automated CI/CD & Testing',
-    'Add Phase: Payments & Stripe Subscriptions',
-    ...(activePhase ? [`Explain Phase ${activePhase.order} use cases & tasks`] : []),
+    ...(activePhase ? [`Ask about Phase 0${activePhase.order}: ${activePhase.title}`] : []),
   ];
 
   return (
@@ -594,7 +613,257 @@ export function RoadmapCopilotDrawer({
                     </div>
                   </div>
 
-                  {copilot && copilot.action !== 'none' && copilot.phase_data && (
+                  {copilot && copilot.action === 'update_tech_stack' && (
+                    <div
+                      className={`p-4 rounded-xl border text-sm space-y-3.5 shadow-xs ${
+                        isDark
+                          ? 'bg-[#141416] border-amber-900/60 text-stone-200'
+                          : 'bg-white border-amber-200 text-stone-800'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span
+                          className={`px-2.5 py-0.5 rounded-md text-xs font-semibold border flex items-center gap-1.5 ${
+                            isDark
+                              ? 'bg-amber-950/70 border-amber-700/60 text-amber-300'
+                              : 'bg-amber-50 border-amber-300 text-amber-800'
+                          }`}
+                        >
+                          <Cpu className="w-3.5 h-3.5" />
+                          Tech Stack Change Proposal
+                        </span>
+                      </div>
+
+                      <div
+                        className={`p-3 rounded-lg border text-xs space-y-2 ${
+                          isDark ? 'bg-black/40 border-stone-800' : 'bg-stone-50 border-stone-200'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="flex-1 min-w-0">
+                            <span className={`block text-[10px] uppercase font-bold tracking-wider ${isDark ? 'text-stone-400' : 'text-stone-500'}`}>
+                              Current Tech Stack
+                            </span>
+                            <span className="font-mono text-xs font-medium truncate block mt-0.5">
+                              {selectedProject.tech_stack || 'Standard Stack'}
+                            </span>
+                          </div>
+                          <ArrowRight className="w-4 h-4 text-[#FFC900] shrink-0" />
+                          <div className="flex-1 min-w-0">
+                            <span className={`block text-[10px] uppercase font-bold tracking-wider ${isDark ? 'text-emerald-400' : 'text-emerald-700'}`}>
+                              Proposed Tech Stack
+                            </span>
+                            <span className="font-mono text-xs font-semibold text-emerald-400 truncate block mt-0.5">
+                              {copilot.new_tech_stack || 'Optimized Stack'}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+
+                      {copilot.change_summary && (
+                        <div className={`text-xs leading-relaxed p-2.5 rounded-lg border ${
+                          isDark ? 'bg-stone-900/50 border-stone-800 text-stone-300' : 'bg-stone-100/70 border-stone-200 text-stone-800'
+                        }`}>
+                          <span className="font-semibold block mb-1 text-[11px] uppercase tracking-wide text-[#FFC900]">Migration Overview</span>
+                          {copilot.change_summary}
+                        </div>
+                      )}
+
+                      {copilot.impact_on_completed_tasks && (
+                        <div className={`p-2.5 rounded-lg border flex items-start gap-2 text-xs ${
+                          isDark ? 'bg-amber-950/40 border-amber-800/60 text-amber-300' : 'bg-amber-50 border-amber-200 text-amber-900'
+                        }`}>
+                          <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-amber-400" />
+                          <div>
+                            <span className="font-semibold block text-[11px] uppercase tracking-wide">Impact on Completed Tasks</span>
+                            <span>{copilot.impact_on_completed_tasks}</span>
+                          </div>
+                        </div>
+                      )}
+
+                      {copilot.affected_phases && copilot.affected_phases.length > 0 && (
+                        <div className={`space-y-1.5 pt-2 border-t ${isDark ? 'border-stone-800' : 'border-stone-200'}`}>
+                          <span className={`text-[11px] font-semibold uppercase tracking-wider block ${isDark ? 'text-stone-400' : 'text-stone-500'}`}>
+                            Revised Phases ({copilot.affected_phases.length})
+                          </span>
+                          <div className="space-y-1.5 max-h-48 overflow-y-auto pr-1">
+                            {copilot.affected_phases.map((p, pIdx) => {
+                              const taskCount = (p.milestones || []).reduce((acc: number, m: any) => acc + (m.tasks?.length || 0), 0);
+                              return (
+                                <div
+                                  key={pIdx}
+                                  className={`p-2 rounded-lg border text-xs flex items-center justify-between ${
+                                    isDark ? 'bg-black/30 border-stone-800' : 'bg-stone-50/70 border-stone-200'
+                                  }`}
+                                >
+                                  <div className="flex items-center gap-2">
+                                    <span className="font-mono text-[11px] font-bold text-[#FFC900]">0{pIdx + 1}</span>
+                                    <span className="font-medium truncate max-w-[240px]">{p.title}</span>
+                                  </div>
+                                  <span className={`text-[11px] font-normal ${isDark ? 'text-stone-400' : 'text-stone-500'}`}>
+                                    {p.duration || '2 Wks'} • {taskCount} tasks
+                                  </span>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+
+                      <div className="pt-1 flex items-center justify-end gap-2">
+                        {isApplied ? (
+                          <div className="flex items-center gap-1.5 font-semibold text-xs text-emerald-500 bg-emerald-500/10 border border-emerald-500/20 px-3 py-1.5 rounded-lg">
+                            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" />
+                            Applied to Project & Roadmap
+                          </div>
+                        ) : rejectedActionIds[msg.id] ? (
+                          <span className={`text-xs px-3 py-1.5 rounded-lg border ${
+                            isDark ? 'bg-stone-900 border-stone-800 text-stone-500' : 'bg-stone-100 border-stone-300 text-stone-500'
+                          }`}>
+                            Proposal Dismissed
+                          </span>
+                        ) : (
+                          <>
+                            <button
+                              onClick={() => handleRejectAction(msg.id)}
+                              disabled={isApplying}
+                              className={`px-3 py-1.5 rounded-lg border font-medium text-xs transition-colors cursor-pointer ${
+                                isDark ? 'border-stone-700 hover:bg-stone-800 text-stone-300' : 'border-stone-300 hover:bg-stone-100 text-stone-700'
+                              }`}
+                            >
+                              Reject
+                            </button>
+                            <button
+                              onClick={() => handleApplyAction(msg.id, copilot)}
+                              disabled={isApplying}
+                              className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-[#FFC900] hover:bg-[#E5B500] text-black font-semibold text-xs shadow-xs transition-all active:scale-95 disabled:opacity-50 cursor-pointer"
+                            >
+                              {isApplying ? (
+                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                              ) : (
+                                <Plus className="w-3.5 h-3.5" />
+                              )}
+                              Accept & Update Stack
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {copilot && copilot.action === 'update_roadmap' && (
+                    <div
+                      className={`p-4 rounded-xl border text-sm space-y-3.5 shadow-xs ${
+                        isDark
+                          ? 'bg-[#141416] border-emerald-900/60 text-stone-200'
+                          : 'bg-white border-emerald-200 text-stone-800'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span
+                          className={`px-2.5 py-0.5 rounded-md text-xs font-semibold border flex items-center gap-1.5 ${
+                            isDark
+                              ? 'bg-emerald-950/70 border-emerald-700/60 text-emerald-300'
+                              : 'bg-emerald-50 border-emerald-300 text-emerald-800'
+                          }`}
+                        >
+                          <Layers className="w-3.5 h-3.5" />
+                          Roadmap Architecture Revision
+                        </span>
+                      </div>
+
+                      {copilot.change_summary && (
+                        <div className={`text-xs leading-relaxed p-2.5 rounded-lg border ${
+                          isDark ? 'bg-stone-900/50 border-stone-800 text-stone-300' : 'bg-stone-100/70 border-stone-200 text-stone-800'
+                        }`}>
+                          <span className="font-semibold block mb-1 text-[11px] uppercase tracking-wide text-[#FFC900]">Proposed Changes</span>
+                          {copilot.change_summary}
+                        </div>
+                      )}
+
+                      {copilot.impact_on_completed_tasks && (
+                        <div className={`p-2.5 rounded-lg border flex items-start gap-2 text-xs ${
+                          isDark ? 'bg-amber-950/40 border-amber-800/60 text-amber-300' : 'bg-amber-50 border-amber-200 text-amber-900'
+                        }`}>
+                          <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-amber-400" />
+                          <div>
+                            <span className="font-semibold block text-[11px] uppercase tracking-wide">Impact on Completed Tasks</span>
+                            <span>{copilot.impact_on_completed_tasks}</span>
+                          </div>
+                        </div>
+                      )}
+
+                      {copilot.affected_phases && copilot.affected_phases.length > 0 && (
+                        <div className={`space-y-1.5 pt-2 border-t ${isDark ? 'border-stone-800' : 'border-stone-200'}`}>
+                          <span className={`text-[11px] font-semibold uppercase tracking-wider block ${isDark ? 'text-stone-400' : 'text-stone-500'}`}>
+                            Updated Phases ({copilot.affected_phases.length})
+                          </span>
+                          <div className="space-y-1.5 max-h-48 overflow-y-auto pr-1">
+                            {copilot.affected_phases.map((p, pIdx) => {
+                              const taskCount = (p.milestones || []).reduce((acc: number, m: any) => acc + (m.tasks?.length || 0), 0);
+                              return (
+                                <div
+                                  key={pIdx}
+                                  className={`p-2 rounded-lg border text-xs flex items-center justify-between ${
+                                    isDark ? 'bg-black/30 border-stone-800' : 'bg-stone-50/70 border-stone-200'
+                                  }`}
+                                >
+                                  <div className="flex items-center gap-2">
+                                    <span className="font-mono text-[11px] font-bold text-[#FFC900]">0{pIdx + 1}</span>
+                                    <span className="font-medium truncate max-w-[240px]">{p.title}</span>
+                                  </div>
+                                  <span className={`text-[11px] font-normal ${isDark ? 'text-stone-400' : 'text-stone-500'}`}>
+                                    {p.duration || '2 Wks'} • {taskCount} tasks
+                                  </span>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+
+                      <div className="pt-1 flex items-center justify-end gap-2">
+                        {isApplied ? (
+                          <div className="flex items-center gap-1.5 font-semibold text-xs text-emerald-500 bg-emerald-500/10 border border-emerald-500/20 px-3 py-1.5 rounded-lg">
+                            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" />
+                            Applied to Roadmap
+                          </div>
+                        ) : rejectedActionIds[msg.id] ? (
+                          <span className={`text-xs px-3 py-1.5 rounded-lg border ${
+                            isDark ? 'bg-stone-900 border-stone-800 text-stone-500' : 'bg-stone-100 border-stone-300 text-stone-500'
+                          }`}>
+                            Proposal Dismissed
+                          </span>
+                        ) : (
+                          <>
+                            <button
+                              onClick={() => handleRejectAction(msg.id)}
+                              disabled={isApplying}
+                              className={`px-3 py-1.5 rounded-lg border font-medium text-xs transition-colors cursor-pointer ${
+                                isDark ? 'border-stone-700 hover:bg-stone-800 text-stone-300' : 'border-stone-300 hover:bg-stone-100 text-stone-700'
+                              }`}
+                            >
+                              Reject
+                            </button>
+                            <button
+                              onClick={() => handleApplyAction(msg.id, copilot)}
+                              disabled={isApplying}
+                              className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-[#FFC900] hover:bg-[#E5B500] text-black font-semibold text-xs shadow-xs transition-all active:scale-95 disabled:opacity-50 cursor-pointer"
+                            >
+                              {isApplying ? (
+                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                              ) : (
+                                <Plus className="w-3.5 h-3.5" />
+                              )}
+                              Accept & Apply Changes
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {copilot && (copilot.action === 'add_phase' || copilot.action === 'edit_phase') && copilot.phase_data && (
                     <div
                       className={`p-4 rounded-xl border text-sm space-y-3 shadow-xs ${
                         isDark
@@ -622,6 +891,27 @@ export function RoadmapCopilotDrawer({
                           </span>
                         </div>
                       </div>
+
+                      {copilot.change_summary && (
+                        <div className={`text-xs leading-relaxed p-2.5 rounded-lg border ${
+                          isDark ? 'bg-stone-900/50 border-stone-800 text-stone-300' : 'bg-stone-100/70 border-stone-200 text-stone-800'
+                        }`}>
+                          <span className="font-semibold block mb-0.5 text-[11px] uppercase tracking-wide text-[#FFC900]">Summary</span>
+                          {copilot.change_summary}
+                        </div>
+                      )}
+
+                      {copilot.impact_on_completed_tasks && (
+                        <div className={`p-2.5 rounded-lg border flex items-start gap-2 text-xs ${
+                          isDark ? 'bg-amber-950/40 border-amber-800/60 text-amber-300' : 'bg-amber-50 border-amber-200 text-amber-900'
+                        }`}>
+                          <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-amber-400" />
+                          <div>
+                            <span className="font-semibold block text-[11px] uppercase tracking-wide">Impact on Completed Tasks</span>
+                            <span>{copilot.impact_on_completed_tasks}</span>
+                          </div>
+                        </div>
+                      )}
 
                       <div>
                         <h4
@@ -695,25 +985,42 @@ export function RoadmapCopilotDrawer({
                         </div>
                       )}
 
-                      <div className="pt-1 flex justify-end">
+                      <div className="pt-1 flex items-center justify-end gap-2">
                         {isApplied ? (
                           <div className="flex items-center gap-1.5 font-semibold text-xs text-emerald-500 bg-emerald-500/10 border border-emerald-500/20 px-3 py-1.5 rounded-lg">
                             <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" />
                             Applied to Roadmap
                           </div>
+                        ) : rejectedActionIds[msg.id] ? (
+                          <span className={`text-xs px-3 py-1.5 rounded-lg border ${
+                            isDark ? 'bg-stone-900 border-stone-800 text-stone-500' : 'bg-stone-100 border-stone-300 text-stone-500'
+                          }`}>
+                            Proposal Dismissed
+                          </span>
                         ) : (
-                          <button
-                            onClick={() => handleApplyAction(msg.id, copilot)}
-                            disabled={isApplying}
-                            className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-[#FFC900] hover:bg-[#E5B500] text-black font-semibold text-xs shadow-xs transition-all active:scale-95 disabled:opacity-50 cursor-pointer"
-                          >
-                            {isApplying ? (
-                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                            ) : (
-                              <Plus className="w-3.5 h-3.5" />
-                            )}
-                            Apply to Roadmap
-                          </button>
+                          <>
+                            <button
+                              onClick={() => handleRejectAction(msg.id)}
+                              disabled={isApplying}
+                              className={`px-3 py-1.5 rounded-lg border font-medium text-xs transition-colors cursor-pointer ${
+                                isDark ? 'border-stone-700 hover:bg-stone-800 text-stone-300' : 'border-stone-300 hover:bg-stone-100 text-stone-700'
+                              }`}
+                            >
+                              Reject
+                            </button>
+                            <button
+                              onClick={() => handleApplyAction(msg.id, copilot)}
+                              disabled={isApplying}
+                              className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-[#FFC900] hover:bg-[#E5B500] text-black font-semibold text-xs shadow-xs transition-all active:scale-95 disabled:opacity-50 cursor-pointer"
+                            >
+                              {isApplying ? (
+                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                              ) : (
+                                <Plus className="w-3.5 h-3.5" />
+                              )}
+                              Apply to Roadmap
+                            </button>
+                          </>
                         )}
                       </div>
                     </div>
@@ -737,25 +1044,42 @@ export function RoadmapCopilotDrawer({
                           ? `Phase ${copilot.target_phase_order} will be deleted and subsequent phases will be re-sequenced.`
                           : 'The selected phase will be permanently deleted.'}
                       </p>
-                      <div className="pt-1 flex justify-end">
+                      <div className="pt-1 flex items-center justify-end gap-2">
                         {isApplied ? (
                           <div className="flex items-center gap-1.5 font-semibold text-xs text-emerald-400 bg-emerald-950/60 border border-emerald-800/80 px-3.5 py-1.5 rounded-lg">
                             <CheckCircle2 className="w-4 h-4 text-emerald-400" />
                             Phase Removed
                           </div>
+                        ) : rejectedActionIds[msg.id] ? (
+                          <span className={`text-xs px-3 py-1.5 rounded-lg border ${
+                            isDark ? 'bg-stone-900 border-stone-800 text-stone-500' : 'bg-stone-100 border-stone-300 text-stone-500'
+                          }`}>
+                            Proposal Dismissed
+                          </span>
                         ) : (
-                          <button
-                            onClick={() => handleApplyAction(msg.id, copilot)}
-                            disabled={isApplying}
-                            className="flex items-center gap-2 px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-500 text-white font-semibold text-xs shadow-sm transition-transform active:scale-95 disabled:opacity-50 cursor-pointer"
-                          >
-                            {isApplying ? (
-                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                            ) : (
-                              <Trash2 className="w-3.5 h-3.5" />
-                            )}
-                            Confirm Removal
-                          </button>
+                          <>
+                            <button
+                              onClick={() => handleRejectAction(msg.id)}
+                              disabled={isApplying}
+                              className={`px-3 py-1.5 rounded-lg border font-medium text-xs transition-colors cursor-pointer ${
+                                isDark ? 'border-stone-700 hover:bg-stone-800 text-stone-300' : 'border-stone-300 hover:bg-stone-100 text-stone-700'
+                              }`}
+                            >
+                              Cancel
+                            </button>
+                            <button
+                              onClick={() => handleApplyAction(msg.id, copilot)}
+                              disabled={isApplying}
+                              className="flex items-center gap-2 px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-500 text-white font-semibold text-xs shadow-sm transition-transform active:scale-95 disabled:opacity-50 cursor-pointer"
+                            >
+                              {isApplying ? (
+                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                              ) : (
+                                <Trash2 className="w-3.5 h-3.5" />
+                              )}
+                              Confirm Removal
+                            </button>
+                          </>
                         )}
                       </div>
                     </div>

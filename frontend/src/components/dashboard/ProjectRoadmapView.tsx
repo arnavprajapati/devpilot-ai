@@ -36,7 +36,7 @@ interface ProjectRoadmapViewProps {
   toggleTaskCompleted: (taskId: number) => void;
   expandedPhases: Record<number, boolean>;
   togglePhaseExpanded: (phaseId: number) => void;
-  onRoadmapUpdated?: (updatedRoadmap: Roadmap) => void;
+  onRoadmapUpdated?: (updatedRoadmap: Roadmap, updatedProject?: Project) => void;
 }
 
 export function ProjectRoadmapView({
@@ -854,7 +854,24 @@ export function ProjectRoadmapView({
                       </div>
                     </div>
 
-                    <div className="flex items-center gap-4 shrink-0 pl-4">
+                    <div className="flex items-center gap-2.5 sm:gap-4 shrink-0 pl-4">
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setCopilotPhaseId(phase.id);
+                          setIsCopilotOpen(true);
+                        }}
+                        className={`text-xs font-semibold px-2.5 py-1.5 border transition-all cursor-pointer flex items-center gap-1.5 active:scale-95 shadow-xs ${
+                          isDark
+                            ? 'border-[#242321] hover:border-[#FFC900]/50 bg-[#141518] text-[#A6A4A0] hover:text-[#FFC900]'
+                            : 'border-[#E8E1D5] hover:border-[#D9A300]/50 bg-white text-[#6B665E] hover:text-[#D9A300]'
+                        }`}
+                        title={`Ask Copilot about Phase 0${pIdx + 1}`}
+                      >
+                        <Sparkles className="w-3.5 h-3.5 text-[#FFC900]" />
+                        <span className="hidden md:inline">Ask Copilot</span>
+                      </button>
                       <span
                         className={`hidden sm:inline-block text-sm font-normal px-2.5 py-1 border ${
                           isDark
@@ -1156,9 +1173,10 @@ export function ProjectRoadmapView({
         roadmap={roadmap}
         selectedProject={selectedProject}
         activePhaseId={copilotPhaseId}
-        onRoadmapUpdated={(updated) => {
+        completedTaskIds={completedTaskIds}
+        onRoadmapUpdated={(updated, updatedProject) => {
           if (onRoadmapUpdated) {
-            onRoadmapUpdated(updated);
+            onRoadmapUpdated(updated, updatedProject);
           }
         }}
       />

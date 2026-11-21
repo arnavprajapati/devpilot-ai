@@ -6,6 +6,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from projects.models import Project
+from projects.serializers import ProjectSerializer
 from .models import (
     Roadmap,
     RoadmapMilestone,
@@ -115,6 +116,7 @@ class ProjectRoadmapChatCopilotView(APIView):
 
         conversation_history = request.data.get('conversation_history', [])
         active_phase_id = request.data.get('active_phase_id')
+        completed_task_ids = request.data.get('completed_task_ids', [])
 
         try:
             result = RoadmapCopilotService.chat(
@@ -123,12 +125,63 @@ class ProjectRoadmapChatCopilotView(APIView):
                 prompt_text=prompt_text,
                 conversation_history=conversation_history,
                 active_phase_id=active_phase_id,
+                completed_task_ids=completed_task_ids,
             )
             return Response(result, status=status.HTTP_200_OK)
         except ValueError as err:
             return Response({'error': str(err)}, status=status.HTTP_400_BAD_REQUEST)
         except Exception as err:
             return Response({'error': str(err) if str(err) else 'Unable to process with AI Copilot. Please try again.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+def _sync_milestones_and_tasks(phase, milestones_data):
+    existing_milestones = list(phase.milestones.all().order_by('order'))
+    kept_milestone_ids = []
+    for m_idx, m_item in enumerate(milestones_data, start=1):
+        m_title = m_item.get('title', f"Milestone {m_idx}")
+        m_desc = m_item.get('description', '')
+        matched_m = None
+        if m_idx <= len(existing_milestones):
+            matched_m = existing_milestones[m_idx - 1]
+        if matched_m:
+            matched_m.title = m_title
+            matched_m.description = m_desc
+            matched_m.order = m_idx
+            matched_m.save()
+            milestone = matched_m
+        else:
+            milestone = RoadmapMilestone.objects.create(
+                phase=phase,
+                title=m_title,
+                description=m_desc,
+                order=m_idx,
+            )
+        kept_milestone_ids.append(milestone.id)
+
+        existing_tasks = list(milestone.tasks.all().order_by('order'))
+        kept_task_ids = []
+        for t_idx, t_item in enumerate(m_item.get('tasks', []), start=1):
+            t_title = t_item.get('title', f"Task {t_idx}")
+            t_desc = t_item.get('description', '')
+            matched_t = None
+            if t_idx <= len(existing_tasks):
+                matched_t = existing_tasks[t_idx - 1]
+            if matched_t:
+                matched_t.title = t_title
+                matched_t.description = t_desc
+                matched_t.order = t_idx
+                matched_t.save()
+                task = matched_t
+            else:
+                task = RoadmapTask.objects.create(
+                    milestone=milestone,
+                    title=t_title,
+                    description=t_desc,
+                    order=t_idx,
+                )
+            kept_task_ids.append(task.id)
+        milestone.tasks.exclude(id__in=kept_task_ids).delete()
+    phase.milestones.exclude(id__in=kept_milestone_ids).delete()
 
 
 class ProjectRoadmapApplyPhaseActionView(APIView):
@@ -142,7 +195,8 @@ class ProjectRoadmapApplyPhaseActionView(APIView):
             return Response({'error': 'Roadmap does not exist.'}, status=status.HTTP_404_NOT_FOUND)
 
         action = request.data.get('action')
-        if action not in ['add_phase', 'edit_phase', 'reorder_phase', 'delete_phase']:
+        allowed_actions = ['add_phase', 'edit_phase', 'reorder_phase', 'delete_phase', 'update_tech_stack', 'update_roadmap']
+        if action not in allowed_actions:
             return Response({'error': f"Unsupported action: '{action}'."}, status=status.HTTP_400_BAD_REQUEST)
         phase_data = request.data.get('phase_data') or {}
         target_phase_id = request.data.get('target_phase_id')
@@ -209,21 +263,7 @@ class ProjectRoadmapApplyPhaseActionView(APIView):
                     phase.save()
 
                     if phase_data.get('milestones'):
-                        phase.milestones.all().delete()
-                        for m_idx, m_item in enumerate(phase_data['milestones'], start=1):
-                            milestone = RoadmapMilestone.objects.create(
-                                phase=phase,
-                                title=m_item.get('title', f"Milestone {m_idx}"),
-                                description=m_item.get('description', ''),
-                                order=m_idx,
-                            )
-                            for t_idx, t_item in enumerate(m_item.get('tasks', []), start=1):
-                                RoadmapTask.objects.create(
-                                    milestone=milestone,
-                                    title=t_item.get('title', f"Task {t_idx}"),
-                                    description=t_item.get('description', ''),
-                                    order=t_idx,
-                                )
+                        _sync_milestones_and_tasks(phase, phase_data['milestones'])
 
             elif action == 'reorder_phase':
                 phase = None
@@ -257,6 +297,46 @@ class ProjectRoadmapApplyPhaseActionView(APIView):
                 if phase:
                     phase.delete()
 
+            elif action in ['update_tech_stack', 'update_roadmap']:
+                new_tech_stack = request.data.get('new_tech_stack')
+                if action == 'update_tech_stack' and new_tech_stack and str(new_tech_stack).strip():
+                    project.tech_stack = str(new_tech_stack).strip()
+                    project.save()
+
+                affected_phases = request.data.get('affected_phases') or []
+                if affected_phases:
+                    existing_phases = list(roadmap.phases.all().order_by('order'))
+                    kept_phase_ids = []
+                    for p_idx, p_item in enumerate(affected_phases, start=1):
+                        p_title = p_item.get('title', f"Phase {p_idx}")
+                        p_desc = p_item.get('description', '')
+                        p_dur = p_item.get('duration', '2 Weeks')
+                        target_p = None
+                        p_id = p_item.get('id')
+                        if p_id:
+                            target_p = roadmap.phases.filter(id=p_id).first()
+                        if not target_p and p_idx <= len(existing_phases):
+                            target_p = existing_phases[p_idx - 1]
+                        if target_p:
+                            target_p.title = p_title
+                            target_p.description = p_desc
+                            target_p.duration = p_dur
+                            target_p.order = p_idx
+                            target_p.save()
+                            curr_phase = target_p
+                        else:
+                            curr_phase = RoadmapPhase.objects.create(
+                                roadmap=roadmap,
+                                title=p_title,
+                                description=p_desc,
+                                duration=p_dur,
+                                order=p_idx,
+                            )
+                        kept_phase_ids.append(curr_phase.id)
+                        if p_item.get('milestones'):
+                            _sync_milestones_and_tasks(curr_phase, p_item['milestones'])
+                    roadmap.phases.exclude(id__in=kept_phase_ids).delete()
+
             for idx, p in enumerate(roadmap.phases.all().order_by('order'), start=1):
                 if p.order != idx:
                     p.order = idx
@@ -268,6 +348,7 @@ class ProjectRoadmapApplyPhaseActionView(APIView):
             return Response({
                 'message': 'Roadmap updated successfully.',
                 'roadmap': serializer.data,
+                'project': ProjectSerializer(project).data,
             }, status=status.HTTP_200_OK)
 
 
