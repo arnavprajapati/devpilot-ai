@@ -69,6 +69,12 @@ export function DashboardView({ onNavigate }: DashboardViewProps) {
   const [isDatabaseGenerating, setIsDatabaseGenerating] = useState(false);
   const [isHeaderCollapsed, setIsHeaderCollapsed] = useState(false);
 
+  useEffect(() => {
+    if (detailsTab !== 'whiteboard' && detailsTab !== 'database') {
+      setIsHeaderCollapsed(false);
+    }
+  }, [detailsTab]);
+
   const togglePhaseExpanded = (phaseId: number) => {
     setExpandedPhases((prev) => ({ ...prev, [phaseId]: !prev[phaseId] }));
   };
@@ -632,7 +638,7 @@ export function DashboardView({ onNavigate }: DashboardViewProps) {
             isDark ? 'bg-[#08090B] text-[#F5F3EF]' : 'bg-[#F7F3EA] text-[#171717]'
           }`}
         >
-          {isHeaderCollapsed && (
+          {isHeaderCollapsed && (detailsTab === 'whiteboard' || detailsTab === 'database') && (
             <div className="absolute top-2.5 left-1/2 -translate-x-1/2 z-50 animate-in fade-in slide-in-from-top-2 duration-200">
               <button
                 type="button"
@@ -655,7 +661,7 @@ export function DashboardView({ onNavigate }: DashboardViewProps) {
 
           <header
             className={`transition-all duration-300 ease-in-out shrink-0 border-b px-5 sm:px-8 flex items-center justify-between font-['Plus_Jakarta_Sans',sans-serif] ${
-              isHeaderCollapsed
+              isHeaderCollapsed && (detailsTab === 'whiteboard' || detailsTab === 'database')
                 ? '-mt-20 opacity-0 pointer-events-none h-0 py-0 border-b-0 overflow-hidden'
                 : 'h-16 sm:h-18 opacity-100'
             } ${
@@ -838,19 +844,21 @@ export function DashboardView({ onNavigate }: DashboardViewProps) {
                 </button>
               )}
 
-              <button
-                type="button"
-                onClick={() => setIsHeaderCollapsed(true)}
-                title="Collapse header for full screen canvas"
-                className={`px-2.5 py-1.5 rounded-lg border transition-colors cursor-pointer flex items-center gap-1.5 text-xs font-semibold tracking-tight ${
-                  isDark
-                    ? 'border-[#242321] text-[#A6A4A0] hover:text-[#F5F3EF] hover:border-[#FFC900]/50 bg-[#18191D]'
-                    : 'border-[#E8E1D5] text-[#6B665E] hover:text-[#171717] hover:border-[#D9A300]/50 bg-white'
-                }`}
-              >
-                <ChevronUp className="w-3.5 h-3.5 text-[#FFC900]" />
-                <span className="hidden md:inline">Full Screen</span>
-              </button>
+              {(detailsTab === 'whiteboard' || detailsTab === 'database') && (
+                <button
+                  type="button"
+                  onClick={() => setIsHeaderCollapsed(true)}
+                  title="Collapse header for full screen canvas"
+                  className={`px-2.5 py-1.5 rounded-lg border transition-colors cursor-pointer flex items-center gap-1.5 text-xs font-semibold tracking-tight ${
+                    isDark
+                      ? 'border-[#242321] text-[#A6A4A0] hover:text-[#F5F3EF] hover:border-[#FFC900]/50 bg-[#18191D]'
+                      : 'border-[#E8E1D5] text-[#6B665E] hover:text-[#171717] hover:border-[#D9A300]/50 bg-white'
+                  }`}
+                >
+                  <ChevronUp className="w-3.5 h-3.5 text-[#FFC900]" />
+                  <span className="hidden md:inline">Full Screen</span>
+                </button>
+              )}
 
               <button
                 type="button"
@@ -958,6 +966,7 @@ export function DashboardView({ onNavigate }: DashboardViewProps) {
               </div>
             ) : detailsTab === 'database' ? (
               <DatabaseSchemaCanvas
+                key={selectedProject.id}
                 project={selectedProject}
                 onRegisterRegenerate={(fn) => {
                   dbRegenerateRef.current = fn;

@@ -65,6 +65,7 @@ export interface RoadmapCopilotResponse {
   affected_phases?: any[] | null;
   change_summary?: string | null;
   impact_on_completed_tasks?: string | null;
+  roadmap_version?: string | null;
 }
 
 export const roadmapApi = {
@@ -76,6 +77,10 @@ export const roadmapApi = {
       {
         method: 'POST',
       }
+    ),
+  getCopilotSession: (projectId: number) =>
+    apiRequest<{ messages: any[]; confirmed_decisions: any[] }>(
+      `/api/projects/${projectId}/roadmap/chat/`
     ),
   chatCopilot: (
     projectId: number,
@@ -103,6 +108,7 @@ export const roadmapApi = {
       new_tech_stack?: string | null;
       affected_phases?: any[] | null;
       change_summary?: string | null;
+      roadmap_version?: string | null;
     }
   ) =>
     apiRequest<{ message: string; roadmap: Roadmap; project?: any }>(

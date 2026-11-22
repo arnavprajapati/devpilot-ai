@@ -205,6 +205,9 @@ function parseMessageBlocks(text: string): MessageBlock[] {
               if (nextSub < lines.length && /^[-*•]\s+/.test(lines[nextSub].trim())) {
                 i = nextSub;
                 continue;
+              } else if (nextSub < lines.length && /^\d+\.\s+/.test(lines[nextSub].trim())) {
+                i = nextSub;
+                break;
               } else {
                 break;
               }
@@ -232,23 +235,15 @@ function parseMessageBlocks(text: string): MessageBlock[] {
   const mergedBlocks: MessageBlock[] = [];
   for (const block of blocks) {
     if (block.type === 'list' && block.ordered && mergedBlocks.length > 0) {
-      const lastBlock = mergedBlocks[mergedBlocks.length - 1];
-      if (lastBlock.type === 'list' && lastBlock.ordered) {
-        lastBlock.items.push(...block.items);
-        continue;
+      let spaceCount = 0;
+      let checkIdx = mergedBlocks.length - 1;
+      while (checkIdx >= 0 && mergedBlocks[checkIdx].type === 'space') {
+        spaceCount++;
+        checkIdx--;
       }
-      if (
-        lastBlock.type === 'space' &&
-        mergedBlocks.length > 1 &&
-        mergedBlocks[mergedBlocks.length - 2].type === 'list' &&
-        (mergedBlocks[mergedBlocks.length - 2] as { type: 'list'; items: ListItem[]; ordered: boolean }).ordered
-      ) {
-        mergedBlocks.pop();
-        const prevList = mergedBlocks[mergedBlocks.length - 1] as {
-          type: 'list';
-          items: ListItem[];
-          ordered: boolean;
-        };
+      if (checkIdx >= 0 && mergedBlocks[checkIdx].type === 'list' && (mergedBlocks[checkIdx] as any).ordered) {
+        mergedBlocks.splice(checkIdx + 1, spaceCount);
+        const prevList = mergedBlocks[checkIdx] as { type: 'list'; items: ListItem[]; ordered: boolean };
         prevList.items.push(...block.items);
         continue;
       }
@@ -428,17 +423,44 @@ export function RoadmapCopilotDrawer({
   }, [roadmap, selectedScopePhaseId]);
 
   useEffect(() => {
-    if (isOpen && messages.length === 0) {
-      setMessages([
-        {
-          id: 'welcome',
-          sender: 'assistant',
-          text: `Hello! I am your **DevPilot AI Roadmap Copilot**. I can customize your project architecture, advise on and update your tech stack, and adjust any phase or tasks for **${selectedProject.name}**. Feel free to ask questions, request tech stack migrations, or add new features.`,
-          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        },
-      ]);
+    setMessages([]);
+    setAppliedActionIds({});
+    setRejectedActionIds({});
+    if (isOpen && selectedProject?.id) {
+      roadmapApi.getCopilotSession(selectedProject.id)
+        .then((res) => {
+          if (res.data?.messages && res.data.messages.length > 0) {
+            const restored: RoadmapChatMessage[] = res.data.messages.map((m, idx) => ({
+              id: `hist-${idx}`,
+              sender: m.role === 'user' ? 'user' : 'assistant',
+              text: m.content || '',
+              timestamp: '',
+              copilotResponse: m.response,
+            }));
+            setMessages(restored);
+          } else {
+            setMessages([
+              {
+                id: 'welcome',
+                sender: 'assistant',
+                text: `Hello! I am your **DevPilot AI Roadmap Copilot**. I can customize your project architecture, advise on and update your tech stack, and adjust any phase or tasks for **${selectedProject.name}**. Feel free to ask questions, request tech stack migrations, or add new features.`,
+                timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+              },
+            ]);
+          }
+        })
+        .catch(() => {
+          setMessages([
+            {
+              id: 'welcome',
+              sender: 'assistant',
+              text: `Hello! I am your **DevPilot AI Roadmap Copilot**. I can customize your project architecture, advise on and update your tech stack, and adjust any phase or tasks for **${selectedProject.name}**. Feel free to ask questions, request tech stack migrations, or add new features.`,
+              timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+            },
+          ]);
+        });
     }
-  }, [isOpen, selectedProject.name]);
+  }, [isOpen, selectedProject?.id]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -469,7 +491,7 @@ export function RoadmapCopilotDrawer({
     setInputText('');
     setIsLoading(true);
 
-    const historyPayload = messages.slice(-6).map((m) => ({
+    const historyPayload = messages.slice(-12).map((m) => ({
       role: m.sender === 'user' ? 'user' : 'assistant',
       content: m.text,
     }));
@@ -502,7 +524,7 @@ export function RoadmapCopilotDrawer({
         const errorMsg: RoadmapChatMessage = {
           id: `ai-err-${Date.now()}`,
           sender: 'assistant',
-          text: 'Unable to process request. Please try again.',
+          text: res.error || 'Unable to process request. Please try again.',
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         };
         setMessages((prev) => [...prev, errorMsg]);
@@ -559,7 +581,22 @@ export function RoadmapCopilotDrawer({
         new_tech_stack: copilotRes.new_tech_stack,
         affected_phases: copilotRes.affected_phases,
         change_summary: copilotRes.change_summary,
+        roadmap_version: copilotRes.roadmap_version,
       });
+
+      if (res.error || !res.data) {
+        const errorText = res.error || 'Failed to apply changes.';
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `err-${Date.now()}`,
+            sender: 'assistant',
+            text: `⚠️ **Proposal Stale / Update Blocked**: ${errorText}`,
+            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          },
+        ]);
+        return;
+      }
 
       if (res.data?.roadmap) {
         onRoadmapUpdated(res.data.roadmap, res.data.project);
@@ -574,7 +611,17 @@ export function RoadmapCopilotDrawer({
           },
         ]);
       }
-    } catch (_) {
+    } catch (err: any) {
+      const errMsg = err?.message || 'Failed to apply roadmap changes.';
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `err-${Date.now()}`,
+          sender: 'assistant',
+          text: `⚠️ **Error**: ${errMsg}`,
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        },
+      ]);
     } finally {
       setApplyingMessageId(null);
     }
