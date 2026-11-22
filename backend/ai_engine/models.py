@@ -66,21 +66,34 @@ class RoadmapWhiteboard(models.Model):
 
 
 class ProjectDatabaseSchema(models.Model):
-    project = models.ForeignKey('projects.Project', on_delete=models.CASCADE, related_name='database_schemas')
+    project = models.OneToOneField('projects.Project', on_delete=models.CASCADE, related_name='database_schema')
     schema_type = models.CharField(max_length=20, default='table')
     db_engine = models.CharField(max_length=50, default='PostgreSQL')
     tables = models.JSONField(default=list)
     nodes = models.JSONField(default=list)
     edges = models.JSONField(default=list)
     viewport = models.JSONField(default=dict, blank=True)
+    code = models.TextField(blank=True, default='')
     sql_ddl = models.TextField(blank=True, default='')
     nosql_code = models.TextField(blank=True, default='')
     is_customized = models.BooleanField(default=False)
+    pending_proposal = models.JSONField(default=dict, blank=True)
+    has_conflict = models.BooleanField(default=False)
+    conflict_data = models.JSONField(default=dict, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
-    class Meta:
-        unique_together = ('project', 'schema_type')
+    def __str__(self):
+        return f"Database Schema for {self.project.name} ({self.db_engine})"
+
+
+class ProjectCopilotSession(models.Model):
+    project = models.OneToOneField('projects.Project', on_delete=models.CASCADE, related_name='copilot_session')
+    confirmed_decisions = models.JSONField(default=list)
+    messages = models.JSONField(default=list)
+    schema_messages = models.JSONField(default=list)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self):
-        return f"Database Schema for {self.project.name} ({self.schema_type})"
+        return f"Copilot Session for {self.project.name}"

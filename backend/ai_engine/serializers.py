@@ -75,9 +75,13 @@ class ProjectDatabaseSchemaSerializer(serializers.ModelSerializer):
             'nodes',
             'edges',
             'viewport',
+            'code',
             'sql_ddl',
             'nosql_code',
             'is_customized',
+            'pending_proposal',
+            'has_conflict',
+            'conflict_data',
             'created_at',
             'updated_at',
         ]
