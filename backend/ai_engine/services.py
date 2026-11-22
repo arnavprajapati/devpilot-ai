@@ -3,6 +3,7 @@ import re
 import json
 import requests
 from django.conf import settings
+from django.db import transaction
 from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field
@@ -54,6 +55,7 @@ class RoadmapCopilotResponse(BaseModel):
     affected_phases: Optional[List[GeneratedPhaseSchema]] = Field(default=None, description="List of updated phases when action is update_tech_stack or update_roadmap")
     change_summary: Optional[str] = Field(default=None, description="Clear summary of proposed changes before user accepts")
     impact_on_completed_tasks: Optional[str] = Field(default=None, description="Impact explanation on completed tasks")
+    roadmap_version: Optional[str] = Field(default=None, description="ISO timestamp of roadmap version")
 
 
 class GeneratedColumnSchema(BaseModel):
@@ -92,6 +94,39 @@ class GeneratedDBSchema(BaseModel):
     tables: List[GeneratedTableSchema] = Field(description="List of database tables or document collections")
     sql_ddl: str = Field(default="", description="Ready-to-execute SQL CREATE TABLE statements")
     nosql_code: str = Field(default="", description="Mongoose or Prisma Schema representation")
+
+
+class RoadmapSchemaChangeEntity(BaseModel):
+    name: str = Field(description="Name of the table or collection")
+    action: Literal["create", "modify", "delete", "preserve"] = Field(description="Action to take on this entity")
+    description: Optional[str] = Field(default="", description="Technical reason and description of changes")
+    columns_added: List[str] = Field(default_factory=list, description="Names of columns or fields added")
+    columns_removed: List[str] = Field(default_factory=list, description="Names of columns or fields removed")
+
+
+class RoadmapSchemaProposalSchema(BaseModel):
+    has_changes: bool = Field(description="True if roadmap changes affect stored data models; False if no data-model impact")
+    summary: str = Field(default="", description="Summary of schema proposal")
+    before_after_summary: str = Field(default="", description="Before vs After comparison e.g. Before: 4 tables (...). After: 6 tables (added: subscriptions, invoices; modified: users).")
+    modeling_notes: str = Field(default="", description="Explanation of SQL vs NoSQL architectural design choices for this stack")
+    affected_entities: List[RoadmapSchemaChangeEntity] = Field(default_factory=list, description="List of affected entities with actions")
+    proposed_tables: List[GeneratedTableSchema] = Field(default_factory=list, description="Full proposed list of tables/collections, merging new/modified ones while preserving all existing unmodified tables and IDs")
+    sql_ddl: Optional[str] = Field(default="", description="Updated SQL DDL if relational")
+    nosql_code: Optional[str] = Field(default="", description="Updated NoSQL code if document")
+
+
+class SingleDatabaseSchemaProposal(BaseModel):
+    summary: str = Field(description="Summary of database schema changes derived from project context")
+    rationale: str = Field(description="Architectural rationale explaining entity models and relationships")
+    db_engine: str = Field(description="Target database engine, e.g. PostgreSQL, MongoDB, MySQL, SQLite, Supabase")
+    schema_type: str = Field(description="'table' for relational or 'document' for document databases")
+    tables: List[GeneratedTableSchema] = Field(description="List of database tables or document collections")
+    added_entities: List[str] = Field(default_factory=list, description="Names of new entities added compared to existing schema")
+    modified_entities: List[str] = Field(default_factory=list, description="Names of entities modified compared to existing schema")
+    preserved_entities: List[str] = Field(default_factory=list, description="Names of entities preserved intact from existing schema")
+    removed_entities: List[str] = Field(default_factory=list, description="Names of entities removed from existing schema")
+    code: str = Field(default="", description="Ready-to-execute schema code: SQL DDL for relational or Mongoose/TypeScript schema for document NoSQL")
+    modeling_notes: str = Field(default="", description="Key modeling decisions specific to this engine")
 
 
 class GroqService:
@@ -475,146 +510,476 @@ class DatabaseSchemaService:
     ]
 
     @classmethod
-    def detect_schema_type(cls, project):
+    def determine_database_technology(cls, project):
         stack = (project.tech_stack or '').lower()
-        if 'mongo' in stack or 'nosql' in stack or 'document' in stack or 'firestore' in stack or 'dynamo' in stack:
-            return 'document', 'MongoDB'
+        reqs = (project.requirements or '').lower()
+        combined = f"{stack} {reqs}"
+
+        saved = getattr(project, 'database_schema', None)
+        if saved and saved.db_engine and not saved.has_conflict:
+            s_type = saved.schema_type or ('document' if 'mongo' in saved.db_engine.lower() else 'table')
+            return saved.db_engine, s_type, False, {}
+
+        has_mongo = any(k in combined for k in ['mongo', 'nosql', 'document', 'couch', 'dynamo', 'firestore'])
+        has_sql = any(k in combined for k in ['sql', 'postgres', 'mysql', 'sqlite', 'relational', 'supabase', 'mariadb', 'oracle'])
+
+        has_conflict = False
+        conflict_data = {}
+
+        if has_mongo and has_sql:
+            has_conflict = True
+            conflict_data = {
+                'detected_engines': ['PostgreSQL', 'MongoDB'],
+                'message': "Conflicting database technologies detected in project specifications. Relational schema selected by default; document model preserved.",
+            }
+            return 'PostgreSQL', 'table', has_conflict, conflict_data
+
+        if has_mongo:
+            engine = 'MongoDB'
+            for token in re.findall(r'[A-Za-z0-9_]+', project.tech_stack or ''):
+                tl = token.lower()
+                if tl in ('mongodb', 'mongo', 'dynamodb', 'couchdb', 'firestore'):
+                    engine = token
+                    break
+            return engine, 'document', False, {}
+
         if 'mysql' in stack:
-            return 'table', 'MySQL'
+            return 'MySQL', 'table', False, {}
         if 'sqlite' in stack:
-            return 'table', 'SQLite'
-        return 'table', 'PostgreSQL'
+            return 'SQLite', 'table', False, {}
+        if 'supabase' in stack:
+            return 'Supabase', 'table', False, {}
+        if 'mariadb' in stack:
+            return 'MariaDB', 'table', False, {}
+
+        return 'PostgreSQL', 'table', False, {}
 
     @classmethod
-    def _build_prompt(cls, project, schema_type, db_engine):
-        if schema_type == 'document':
-            return (
-                f"You are a Principal Database Architect.\n"
-                f"Design a production-grade NoSQL Document schema for:\n"
-                f"Project: {project.name}\n"
-                f"Description: {project.description}\n"
-                f"Tech Stack: {project.tech_stack or 'Node.js, Express, MongoDB'}\n"
-                f"Requirements: {project.requirements or 'Standard production architecture'}\n\n"
-                f"Rules:\n"
-                f"- db_engine: '{db_engine}'\n"
-                f"- schema_type: 'document'\n"
-                f"- Create 4 to 6 core collections (e.g. users, orders, products, etc.).\n"
-                f"- Each collection has 4 to 8 fields with clean types (e.g. ObjectId, String, Number, Boolean, Array<String>, Object).\n"
-                f"- If a field references another collection, set is_foreign: true and references: '<TargetCollection>._id'.\n"
-                f"- Provide clean Mongoose / TypeScript schema code in nosql_code.\n"
-                f"- Leave sql_ddl empty."
-            )
-        return (
-            f"You are a Principal Database Architect.\n"
-            f"Design a normalized, production-grade Relational SQL schema for:\n"
-            f"Project: {project.name}\n"
-            f"Description: {project.description}\n"
-            f"Tech Stack: {project.tech_stack or 'React, Django, PostgreSQL'}\n"
-            f"Requirements: {project.requirements or 'Standard production architecture'}\n\n"
-            f"Rules:\n"
-            f"- db_engine: '{db_engine}'\n"
-            f"- schema_type: 'table'\n"
-            f"- Create 4 to 6 normalized tables (e.g. users, projects, tasks, etc.).\n"
-            f"- Each table has 4 to 8 columns with standard SQL data types (e.g. UUID, VARCHAR(255), INTEGER, TIMESTAMP, BOOLEAN, TEXT).\n"
-            f"- Specify is_primary: true on primary keys.\n"
-            f"- Specify is_foreign: true and references: '<target_table>.id' on foreign keys.\n"
-            f"- Provide valid, runnable SQL CREATE TABLE statements with constraints in sql_ddl.\n"
-            f"- Leave nosql_code empty."
-        )
+    def detect_schema_type(cls, project):
+        engine, schema_type, _, _ = cls.determine_database_technology(project)
+        return schema_type, engine
 
     @classmethod
-    def _parse_response(cls, raw_text):
-        raw_text = raw_text.strip()
-        try:
-            validated = GeneratedDBSchema.model_validate_json(raw_text)
-            return validated.model_dump()
-        except Exception:
-            cleaned = raw_text
-            for prefix in ('```json', '```'):
-                if cleaned.startswith(prefix):
-                    cleaned = cleaned[len(prefix):]
-            if cleaned.endswith('```'):
-                cleaned = cleaned[:-3]
-            parsed = json.loads(cleaned.strip())
-            validated = GeneratedDBSchema.model_validate(parsed)
-            return validated.model_dump()
+    def _generate_default_sql_columns(cls, ent_name):
+        clean = (ent_name or '').strip().lower()
+        singular = clean[:-1] if clean.endswith('s') and len(clean) > 3 else clean
+        if clean in ('users', 'accounts', 'user', 'account'):
+            return [
+                {'name': 'id', 'data_type': 'UUID', 'is_primary': True},
+                {'name': 'email', 'data_type': 'VARCHAR(255)', 'is_unique': True},
+                {'name': 'name', 'data_type': 'VARCHAR(255)'},
+                {'name': 'status', 'data_type': 'VARCHAR(50)'},
+                {'name': 'created_at', 'data_type': 'TIMESTAMP'},
+            ]
+        name_col = f"{singular}_name" if singular not in ('item', 'record', 'data', 'detail') else 'name'
+        return [
+            {'name': 'id', 'data_type': 'UUID', 'is_primary': True},
+            {'name': 'user_id', 'data_type': 'UUID', 'is_foreign': True, 'references': 'users.id'},
+            {'name': name_col, 'data_type': 'VARCHAR(255)'},
+            {'name': 'description', 'data_type': 'TEXT'},
+            {'name': 'status', 'data_type': 'VARCHAR(50)'},
+            {'name': 'created_at', 'data_type': 'TIMESTAMP'},
+            {'name': 'updated_at', 'data_type': 'TIMESTAMP'},
+        ]
 
     @classmethod
-    def generate_schema_data(cls, project, forced_type=None):
-        detected_type, default_engine = cls.detect_schema_type(project)
-        schema_type = forced_type if forced_type in ['table', 'document'] else detected_type
-        db_engine = 'MongoDB' if schema_type == 'document' else ('PostgreSQL' if default_engine == 'MongoDB' else default_engine)
+    def _generate_default_nosql_columns(cls, ent_name):
+        clean = (ent_name or '').strip().lower()
+        singular = clean[:-1] if clean.endswith('s') and len(clean) > 3 else clean
+        if clean in ('users', 'accounts', 'user', 'account'):
+            return [
+                {'name': '_id', 'data_type': 'ObjectId', 'is_primary': True},
+                {'name': 'email', 'data_type': 'String', 'is_unique': True},
+                {'name': 'name', 'data_type': 'String'},
+                {'name': 'settings', 'data_type': 'Object'},
+                {'name': 'created_at', 'data_type': 'Date'},
+            ]
+        name_col = f"{singular}_name" if singular not in ('item', 'record', 'data', 'detail') else 'name'
+        return [
+            {'name': '_id', 'data_type': 'ObjectId', 'is_primary': True},
+            {'name': 'user_id', 'data_type': 'ObjectId', 'is_foreign': True, 'references': 'users._id'},
+            {'name': name_col, 'data_type': 'String'},
+            {'name': 'metadata', 'data_type': 'Object'},
+            {'name': 'status', 'data_type': 'String'},
+            {'name': 'created_at', 'data_type': 'Date'},
+        ]
 
-        prompt = cls._build_prompt(project, schema_type, db_engine)
+    @classmethod
+    def _convert_sql_columns_to_nosql(cls, sql_cols):
+        nosql_cols = []
+        for c in sql_cols:
+            c_name = c.get('name', '')
+            if c.get('is_primary'):
+                nosql_cols.append({'name': '_id', 'data_type': 'ObjectId', 'is_primary': True})
+            elif c.get('is_foreign') and c.get('references'):
+                target = c.get('references').split('.')[0]
+                nosql_cols.append({
+                    'name': c_name,
+                    'data_type': 'ObjectId',
+                    'is_foreign': True,
+                    'references': f"{target}._id",
+                })
+            else:
+                dt = (c.get('data_type') or 'VARCHAR(255)').upper()
+                nosql_type = 'String'
+                if 'INT' in dt or 'DECIMAL' in dt or 'FLOAT' in dt:
+                    nosql_type = 'Number'
+                elif 'BOOL' in dt:
+                    nosql_type = 'Boolean'
+                elif 'TIME' in dt or 'DATE' in dt:
+                    nosql_type = 'Date'
+                elif 'JSON' in dt:
+                    nosql_type = 'Object'
+                nosql_cols.append({'name': c_name, 'data_type': nosql_type, 'is_unique': c.get('is_unique')})
+        if not any(c.get('is_primary') for c in nosql_cols):
+            nosql_cols.insert(0, {'name': '_id', 'data_type': 'ObjectId', 'is_primary': True})
+        return nosql_cols
 
+    @classmethod
+    def _convert_nosql_columns_to_sql(cls, nosql_cols):
+        sql_cols = []
+        for c in nosql_cols:
+            c_name = c.get('name', '')
+            if c.get('is_primary') or c_name == '_id':
+                sql_cols.append({'name': 'id', 'data_type': 'UUID', 'is_primary': True})
+            elif c.get('is_foreign') and c.get('references'):
+                target = c.get('references').split('.')[0]
+                sql_cols.append({
+                    'name': c_name,
+                    'data_type': 'UUID',
+                    'is_foreign': True,
+                    'references': f"{target}.id",
+                })
+            else:
+                dt = (c.get('data_type') or 'String').capitalize()
+                sql_type = 'VARCHAR(255)'
+                if dt == 'Number':
+                    sql_type = 'INTEGER'
+                elif dt == 'Boolean':
+                    sql_type = 'BOOLEAN'
+                elif dt == 'Date':
+                    sql_type = 'TIMESTAMP'
+                elif dt in ('Object', 'Array'):
+                    sql_type = 'JSON'
+                sql_cols.append({'name': c_name, 'data_type': sql_type, 'is_unique': c.get('is_unique')})
+        if not any(c.get('is_primary') for c in sql_cols):
+            sql_cols.insert(0, {'name': 'id', 'data_type': 'UUID', 'is_primary': True})
+        return sql_cols
+
+    @classmethod
+    def _build_sql_ddl(cls, tables):
+        statements = []
+        for t in tables:
+            cols = []
+            for c in t.get('columns', []):
+                pk = " PRIMARY KEY" if c.get('is_primary') else ""
+                fk = f" REFERENCES {c.get('references')}" if c.get('is_foreign') and c.get('references') else ""
+                uniq = " UNIQUE" if c.get('is_unique') else ""
+                cols.append(f"  {c.get('name')} {c.get('data_type', 'VARCHAR(255)')}{pk}{fk}{uniq}")
+            statements.append(f"CREATE TABLE {t.get('name')} (\n" + ",\n".join(cols) + "\n);")
+        return "\n\n".join(statements)
+
+    @classmethod
+    def _build_nosql_code(cls, tables):
+        snippets = []
+        for t in tables:
+            fields = []
+            for c in t.get('columns', []):
+                ref_opt = f", ref: '{c.get('references', '').split('.')[0]}'" if c.get('is_foreign') and c.get('references') else ""
+                fields.append(f"  {c.get('name')}: {{ type: {c.get('data_type', 'String')}{ref_opt} }}")
+            snippets.append(f"const {t.get('name').capitalize()}Schema = new Schema({{\n" + ",\n".join(fields) + "\n}});")
+        return "\n\n".join(snippets)
+
+    @classmethod
+    def _extract_domain_entities_dynamically(cls, project, existing_tables=None, schema_type='table'):
+        existing_tables = existing_tables or []
+        entity_dict = {}
+        for t in existing_tables:
+            raw_name = (t.get('name') or '').strip()
+            name_key = raw_name.lower()
+            if raw_name and name_key not in entity_dict:
+                entity_dict[name_key] = {
+                    'name': raw_name,
+                    'description': t.get('description') or f"{raw_name.replace('_', ' ').capitalize()} records",
+                    'columns': t.get('columns') or [],
+                }
+
+        if not entity_dict:
+            roadmap = getattr(project, 'roadmap', None)
+            text_corpus = f"{project.name} {project.description or ''} {project.requirements or ''}"
+            if roadmap:
+                for p in roadmap.phases.all():
+                    text_corpus += f" {p.title} {p.description or ''}"
+                    for m in p.milestones.all():
+                        text_corpus += f" {m.title}"
+                        for tk in m.tasks.all():
+                            text_corpus += f" {tk.title} {tk.description or ''}"
+
+            words = re.findall(r'[A-Za-z][A-Za-z0-9_]{2,}', text_corpus)
+            stopwords = {
+                'the', 'and', 'for', 'with', 'that', 'this', 'from', 'have', 'been',
+                'will', 'should', 'would', 'could', 'create', 'setup', 'build', 'implement',
+                'design', 'manage', 'configure', 'update', 'delete', 'system', 'application',
+                'service', 'platform', 'feature', 'support', 'using', 'based', 'backend',
+                'frontend', 'database', 'project', 'architecture', 'complete', 'roadmap',
+                'phase', 'milestone', 'task', 'tasks', 'user', 'users', 'status', 'type',
+                'item', 'items', 'data', 'details', 'component', 'components', 'module',
+                'modules', 'step', 'steps', 'flow', 'page', 'view', 'api', 'apis', 'test',
+                'testing', 'deploy', 'deployment', 'docker', 'react', 'node', 'django',
+                'python', 'typescript', 'javascript', 'html', 'css', 'tailwind', 'postgres',
+                'postgresql', 'mongodb', 'redis', 'render', 'vercel', 'aws', 'cloud', 'first',
+                'second', 'third', 'initial', 'simple', 'clean', 'stack', 'tool', 'tools',
+            }
+
+            discovered_nouns = []
+            for w in words:
+                wl = w.lower()
+                if wl not in stopwords and len(wl) >= 3 and not wl.isdigit():
+                    noun = wl if wl.endswith('s') and len(wl) > 3 and wl[:-1] not in stopwords else (wl + 's' if not wl.endswith('s') else wl)
+                    if noun not in discovered_nouns and noun not in entity_dict:
+                        discovered_nouns.append(noun)
+
+            if 'users' not in discovered_nouns and 'users' not in entity_dict:
+                discovered_nouns.insert(0, 'users')
+
+            if len(discovered_nouns) == 1 and 'users' in discovered_nouns:
+                clean_proj = re.sub(r'[^a-zA-Z0-9]+', '_', project.name.lower()).strip('_')
+                base_name = f"{clean_proj}_records" if clean_proj else "workspace_records"
+                discovered_nouns.append(base_name)
+
+            for noun in discovered_nouns[:6]:
+                if noun not in entity_dict:
+                    cols = cls._generate_default_nosql_columns(noun) if schema_type == 'document' else cls._generate_default_sql_columns(noun)
+                    entity_dict[noun] = {
+                        'name': noun,
+                        'description': f"{noun.replace('_', ' ').capitalize()} records and data attributes",
+                        'columns': cols,
+                    }
+
+        return list(entity_dict.values())
+
+    @classmethod
+    def _synthesize_single_proposal_from_context(cls, project, db_engine='PostgreSQL', schema_type='table', existing_tables=None):
+        existing_tables = existing_tables or []
+        entities = cls._extract_domain_entities_dynamically(project, existing_tables, schema_type)
+
+        existing_names = set((t.get('name') or '').strip().lower() for t in existing_tables if t.get('name'))
+        tables = []
+        for ent in entities:
+            existing_match = next((t for t in existing_tables if (t.get('name') or '').strip().lower() == ent['name'].lower()), None)
+            if existing_match:
+                tables.append(existing_match)
+            else:
+                tables.append({
+                    'name': ent['name'],
+                    'description': ent['description'],
+                    'columns': ent['columns'],
+                })
+
+        code = cls._build_sql_ddl(tables) if schema_type == 'table' else cls._build_nosql_code(tables)
+        prop_names = set(t['name'].lower() for t in tables)
+
+        return {
+            'summary': f"Unified schema for {project.name} targeting {db_engine} ({schema_type}).",
+            'rationale': f"Normalized schema in {db_engine} preserving existing entities and aligned with roadmap requirements.",
+            'db_engine': db_engine,
+            'schema_type': schema_type,
+            'tables': tables,
+            'code': code,
+            'added_entities': list(prop_names - existing_names),
+            'modified_entities': [],
+            'preserved_entities': list(existing_names & prop_names),
+            'removed_entities': [],
+            'modeling_notes': f"{db_engine} architecture tailored to {project.name}.",
+        }
+
+    @classmethod
+    def _invoke_single_proposal_llm(cls, system_instruction, prompt):
+        proposal_res = None
         if GroqService.is_available():
             try:
-                system_instruction = (
-                    f"You are a Principal Database Architect.\n"
-                    f"Generate a production-ready database schema for {project.name}.\n"
-                    f"Rules:\n"
-                    f"- Return valid JSON matching GeneratedDBSchema: schema_type ('{schema_type}'), db_engine ('{db_engine}'), tables (array of 4 to 7 tables with name, description, columns with name, data_type, is_primary, is_foreign, references, is_unique, is_nullable), sql_ddl, nosql_code."
-                )
-                raw_json = GroqService.generate_json(system_instruction, prompt)
-                validated = GeneratedDBSchema.model_validate(raw_json)
-                gen_schema_type = str(validated.schema_type or '').strip().lower()
-                gen_db_engine = str(validated.db_engine or '').strip().lower()
-                if gen_schema_type != schema_type.lower() or gen_db_engine != db_engine.lower():
-                    raise ValueError(f"Generated schema targeted wrong engine: {validated.db_engine} ({validated.schema_type}), expected {db_engine} ({schema_type})")
-                if schema_type == 'table' and not (validated.sql_ddl or '').strip():
-                    raise ValueError("Generated relational schema is missing sql_ddl.")
-                if schema_type == 'document' and not (validated.nosql_code or '').strip():
-                    raise ValueError("Generated document schema is missing nosql_code.")
-                return validated.model_dump()
+                raw_json = GroqService.generate_json(system_instruction, prompt, timeout=35)
+                validated = SingleDatabaseSchemaProposal.model_validate(raw_json)
+                proposal_res = validated.model_dump()
             except Exception:
                 pass
 
-        api_key = getattr(settings, 'GEMINI_API_KEY', '') or ''
-        if not api_key:
-            raise ValueError("AI API key is not configured.")
+        if not proposal_res:
+            api_key = getattr(settings, 'GEMINI_API_KEY', '') or ''
+            if api_key:
+                configured_model = getattr(settings, 'GEMINI_MODEL', 'gemini-3-flash-preview')
+                models_to_try = [configured_model] + [m for m in cls.FALLBACK_MODELS if m != configured_model]
 
-        configured_model = getattr(settings, 'GEMINI_MODEL', 'gemini-3-flash-preview')
-        models_to_try = [configured_model] + [m for m in cls.FALLBACK_MODELS if m != configured_model]
+                try:
+                    client = genai.Client(api_key=api_key, http_options={'api_version': 'v1beta'})
+                    for model_name in models_to_try:
+                        try:
+                            response = client.models.generate_content(
+                                model=model_name,
+                                contents=f"{system_instruction}\n\n{prompt}",
+                                config=types.GenerateContentConfig(
+                                    response_mime_type='application/json',
+                                    response_schema=SingleDatabaseSchemaProposal,
+                                    temperature=0.2,
+                                ),
+                            )
+                            raw = (response.text or '').strip()
+                            validated = SingleDatabaseSchemaProposal.model_validate_json(raw)
+                            proposal_res = validated.model_dump()
+                            break
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
 
-        client = genai.Client(api_key=api_key, http_options={'api_version': 'v1beta'})
-        prompt = cls._build_prompt(project, schema_type, db_engine)
+        return proposal_res
 
-        last_error = None
-        for model_name in models_to_try:
-            try:
-                response = client.models.generate_content(
-                    model=model_name,
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        response_mime_type='application/json',
-                        response_schema=GeneratedDBSchema,
-                        temperature=0.2,
-                        max_output_tokens=3072,
-                    ),
-                )
-                raw_text = response.text or ''
-                if not raw_text.strip():
-                    last_error = RuntimeError(f"Model {model_name} returned empty response.")
-                    continue
-                data = cls._parse_response(raw_text)
-                gen_schema_type = str(data.get('schema_type', '')).strip().lower()
-                gen_db_engine = str(data.get('db_engine', '')).strip().lower()
-                if gen_schema_type != schema_type.lower() or gen_db_engine != db_engine.lower():
-                    last_error = ValueError(f"Model {model_name} targeted wrong engine: {data.get('db_engine')} ({data.get('schema_type')}), expected {db_engine} ({schema_type})")
-                    continue
-                if schema_type == 'table' and not (data.get('sql_ddl') or '').strip():
-                    last_error = ValueError(f"Model {model_name} generated relational schema missing sql_ddl.")
-                    continue
-                if schema_type == 'document' and not (data.get('nosql_code') or '').strip():
-                    last_error = ValueError(f"Model {model_name} generated document schema missing nosql_code.")
-                    continue
-                return data
-            except Exception as exc:
-                last_error = exc
-                continue
+    @classmethod
+    def generate_regeneration_proposal(cls, project):
+        project.refresh_from_db()
+        roadmap = getattr(project, 'roadmap', None)
+        roadmap_version = str(roadmap.updated_at.isoformat()) if roadmap and roadmap.updated_at else ''
 
-        raise RuntimeError(f"Database schema generation unavailable. Last error: {last_error}")
+        phases_lines = []
+        if roadmap:
+            for p in roadmap.phases.all().order_by('order'):
+                tasks = [t.title for m in p.milestones.all() for t in m.tasks.all()]
+                phases_lines.append(f"Phase {p.order}: {p.title} - Tasks: {', '.join(tasks)}")
+        roadmap_summary = '\n'.join(phases_lines) if phases_lines else 'No roadmap phases defined yet.'
 
+        session = getattr(project, 'copilot_session', None)
+        confirmed_decisions = session.confirmed_decisions if session else []
+        decisions_summary = '\n'.join([f'- {d}' for d in confirmed_decisions]) if confirmed_decisions else 'None'
+
+        db_engine, schema_type, has_conflict, conflict_data = cls.determine_database_technology(project)
+
+        saved_schema = getattr(project, 'database_schema', None)
+        if not saved_schema:
+            from .models import ProjectDatabaseSchema
+            saved_schema = ProjectDatabaseSchema.objects.filter(project=project).first()
+
+        existing_tables = saved_schema.tables if saved_schema and saved_schema.tables else []
+        existing_names = set((t.get('name') or '').strip().lower() for t in existing_tables if t.get('name'))
+        known_entities = ', '.join(existing_names) or 'None yet'
+        schema_version = str(saved_schema.updated_at.isoformat()) if saved_schema and saved_schema.updated_at else ''
+
+        system_instruction = (
+            f"You are a Principal Database Architect & System Designer.\n"
+            f"Your responsibility is to design a unified production-ready database schema strictly for this software project.\n\n"
+            f"Project Name: {project.name}\n"
+            f"Description: {project.description}\n"
+            f"Tech Stack: {project.tech_stack or 'React, Node.js, PostgreSQL'}\n"
+            f"Target Database Technology: {db_engine} ({schema_type.upper()})\n"
+            f"Requirements: {project.requirements or 'Standard production system'}\n"
+            f"Confirmed Architectural Decisions:\n{decisions_summary}\n\n"
+            f"Accepted Execution Roadmap:\n{roadmap_summary}\n\n"
+            f"Current Saved Schema ({db_engine}):\n{json.dumps(existing_tables)}\n\n"
+            f"Strict Architectural & Scope Isolation Rules:\n"
+            f"1. Strict Domain Scope Isolation: You must ONLY generate entities and fields that directly belong to '{project.name}' and its stated requirements. Strictly do NOT introduce unrelated domain entities.\n"
+            f"2. Preservation of Existing Project Work: Preserve all relevant existing user-defined entities ({known_entities}).\n"
+            f"3. Paradigm Accuracy for {db_engine} ({schema_type}):\n"
+            f"   - If relational ({db_engine}): normalized 3NF tables, typed columns, primary keys (is_primary: true), foreign keys (is_foreign: true, references: '<target>.id'). Runnable CREATE TABLE DDL in code.\n"
+            f"   - If document ({db_engine}): flexible collections, typed fields, embedding or referencing (references: '<Target>._id'). Runnable Mongoose schema in code.\n"
+            f"4. Output strictly valid JSON conforming to SingleDatabaseSchemaProposal schema."
+        )
+
+        user_prompt = (
+            f"Generate a database schema proposal derived strictly from '{project.name}' requirements and existing schemas.\n"
+            f"Preserve all existing schema entities ({known_entities}) targeting {db_engine}."
+        )
+
+        proposal = cls._invoke_single_proposal_llm(system_instruction, user_prompt)
+        if proposal:
+            proj_text = f"{project.name} {project.description or ''} {project.requirements or ''}".lower()
+            is_chat_project = any(k in proj_text for k in ['chat', 'messaging', 'channel', 'conversation'])
+            tables = proposal.get('tables', [])
+            has_unrelated_chat = any(
+                t.get('name', '').lower() in ['channels', 'channel_messages', 'messages', 'conversations']
+                for t in tables
+            )
+            if has_unrelated_chat and not is_chat_project:
+                proposal = None
+
+        if not proposal:
+            proposal = cls._synthesize_single_proposal_from_context(
+                project=project,
+                db_engine=db_engine,
+                schema_type=schema_type,
+                existing_tables=existing_tables,
+            )
+
+        proposal['db_engine'] = db_engine
+        proposal['schema_type'] = schema_type
+        proposal['roadmap_version'] = roadmap_version
+        proposal['schema_version'] = schema_version
+        proposal['has_conflict'] = has_conflict
+        proposal['conflict_data'] = conflict_data
+
+        prop_names = set((t.get('name') or '').strip().lower() for t in proposal.get('tables', []) if t.get('name'))
+        proposal['preserved_entities'] = list(existing_names & prop_names)
+        proposal['added_entities'] = list(prop_names - existing_names)
+        proposal['removed_entities'] = list(existing_names - prop_names)
+
+        return proposal
+
+    @classmethod
+    def apply_regeneration(cls, project, proposal_data, client_roadmap_version=None, client_schema_version=None):
+        from .models import ProjectDatabaseSchema
+        project.refresh_from_db()
+
+        if hasattr(project, 'roadmap') and project.roadmap and project.roadmap.updated_at:
+            current_roadmap_version = str(project.roadmap.updated_at.isoformat())
+            if client_roadmap_version and current_roadmap_version and client_roadmap_version != current_roadmap_version:
+                raise ValueError("STALE_REGENERATION: The roadmap was modified after this proposal was generated. Please regenerate with the latest roadmap.")
+
+        saved_schema = getattr(project, 'database_schema', None)
+        if not saved_schema:
+            saved_schema = ProjectDatabaseSchema.objects.filter(project=project).first()
+
+        curr_schema_ver = str(saved_schema.updated_at.isoformat()) if saved_schema and saved_schema.updated_at else ''
+        if client_schema_version and curr_schema_ver and client_schema_version != curr_schema_ver:
+            raise ValueError("STALE_REGENERATION: The database schema was modified after this proposal was generated. Please regenerate again.")
+
+        db_engine = proposal_data.get('db_engine') or (saved_schema.db_engine if saved_schema else 'PostgreSQL')
+        schema_type = proposal_data.get('schema_type') or (saved_schema.schema_type if saved_schema else 'table')
+        tables = proposal_data.get('tables', [])
+
+        nodes, edges = cls.build_layout(schema_type, tables, db_engine)
+        if saved_schema and saved_schema.nodes:
+            pos_map = {n['id']: n.get('position') for n in saved_schema.nodes if isinstance(n, dict) and 'id' in n and 'position' in n}
+            for n in nodes:
+                if n['id'] in pos_map and pos_map[n['id']]:
+                    n['position'] = pos_map[n['id']]
+
+        code = proposal_data.get('code') or ''
+        sql_ddl = code if schema_type == 'table' else proposal_data.get('sql_ddl', '')
+        nosql_code = code if schema_type == 'document' else proposal_data.get('nosql_code', '')
+
+        with transaction.atomic():
+            saved_schema, _ = ProjectDatabaseSchema.objects.update_or_create(
+                project=project,
+                defaults={
+                    'schema_type': schema_type,
+                    'db_engine': db_engine,
+                    'tables': tables,
+                    'nodes': nodes,
+                    'edges': edges,
+                    'code': code,
+                    'sql_ddl': sql_ddl,
+                    'nosql_code': nosql_code,
+                    'is_customized': True,
+                    'pending_proposal': {},
+                    'has_conflict': proposal_data.get('has_conflict', False),
+                    'conflict_data': proposal_data.get('conflict_data', {}),
+                }
+            )
+
+        return saved_schema
+
+    @classmethod
+    def generate_initial_schema(cls, project):
+        proposal = cls.generate_regeneration_proposal(project)
+        return cls.apply_regeneration(project, proposal)
     @classmethod
     def build_layout(cls, schema_type, tables, db_engine):
         seen_entity_names = set()
@@ -679,29 +1044,8 @@ class DatabaseSchemaService:
         return nodes, edges
 
     @classmethod
-    def generate_entity_from_prompt(cls, prompt_text, schema_type='table', db_engine='PostgreSQL', current_entity=None, project=None):
-        context = ""
-        if current_entity:
-            context += f"Current entity: name='{current_entity.get('name')}', description='{current_entity.get('description')}', columns={json.dumps(current_entity.get('columns', []))}\n"
-        if project:
-            context += f"Project: {project.name}, Tech Stack: {project.tech_stack or ''}\n"
-
-        system_instruction = (
-            f"You are DevPilot AI, a Principal Database Architect & Engineering Copilot chatbot.\n"
-            f"You are actively having a conversation with the user about this database {schema_type} ('table' or 'document') for {db_engine}.\n"
-            f"{context}\n"
-            f"User Message: {prompt_text}\n\n"
-            f"Instructions:\n"
-            f"- Output valid JSON matching GeneratedEntityPromptResponse schema.\n"
-            f"- explanation: Speak conversationally like a knowledgeable, helpful chatbot! Directly answer any questions the user asked (for instance, explain what tables or fields are for, how they work together, why they were designed, or answer any technical query). If changes or new tables were requested, explain what was created and why.\n"
-            f"- primary_entity: The entity currently being edited ({current_entity.get('name') if current_entity else 'entity'}). Keep its existing columns intact unless the user explicitly asked to change or add columns to it.\n"
-            f"- new_related_entities: If the user asked to create or connect a new table/collection, define the full new entities here. If no new tables were asked for, keep this list empty [].\n"
-            f"- relationships: Define foreign key connections (source_table, target_table, relationship_type, foreign_key_column) between primary_entity and any new_related_entities or existing tables.\n"
-            f"- For SQL ({db_engine}): data types like UUID, VARCHAR(255), INTEGER, TIMESTAMP, BOOLEAN, TEXT, DECIMAL(10,2).\n"
-            f"- For NoSQL ({db_engine}): data types like ObjectId, String, Number, Boolean, Date, Array<String>, Object.\n"
-            f"- Accurately specify is_primary, is_foreign, references, is_nullable, is_unique."
-        )
-
+    def _invoke_entity_llm(cls, system_instruction, prompt_text):
+        res = None
         if GroqService.is_available():
             try:
                 raw_json = GroqService.generate_json(
@@ -709,37 +1053,326 @@ class DatabaseSchemaService:
                     f"Design entity based on prompt: {prompt_text}"
                 )
                 validated = GeneratedEntityPromptResponse.model_validate(raw_json)
-                return validated.model_dump()
+                res = validated.model_dump()
             except Exception:
                 pass
 
-        api_key = getattr(settings, 'GEMINI_API_KEY', '') or ''
-        if not api_key:
-            raise ValueError("AI API key is not configured.")
+        if not res:
+            api_key = getattr(settings, 'GEMINI_API_KEY', '') or ''
+            if not api_key:
+                raise ValueError("AI API key is not configured.")
 
-        configured_model = getattr(settings, 'GEMINI_MODEL', 'gemini-3-flash-preview')
-        models_to_try = [configured_model] + [m for m in cls.FALLBACK_MODELS if m != configured_model]
+            configured_model = getattr(settings, 'GEMINI_MODEL', 'gemini-3-flash-preview')
+            models_to_try = [configured_model] + [m for m in cls.FALLBACK_MODELS if m != configured_model]
 
-        client = genai.Client(api_key=api_key, http_options={'api_version': 'v1beta'})
+            client = genai.Client(api_key=api_key, http_options={'api_version': 'v1beta'})
 
-        for model_name in models_to_try:
+            for model_name in models_to_try:
+                try:
+                    response = client.models.generate_content(
+                        model=model_name,
+                        contents=system_instruction,
+                        config=types.GenerateContentConfig(
+                            response_mime_type='application/json',
+                            response_schema=GeneratedEntityPromptResponse,
+                            temperature=0.2,
+                        ),
+                    )
+                    raw = (response.text or '').strip()
+                    validated = GeneratedEntityPromptResponse.model_validate_json(raw)
+                    res = validated.model_dump()
+                    break
+                except Exception:
+                    continue
+
+        if not res:
+            raise RuntimeError("Failed to generate entity from prompt.")
+        return res
+
+    @classmethod
+    def _invoke_proposal_llm(cls, system_instruction):
+        proposal_res = None
+        if GroqService.is_available():
             try:
-                response = client.models.generate_content(
-                    model=model_name,
-                    contents=system_instruction,
-                    config=types.GenerateContentConfig(
-                        response_mime_type='application/json',
-                        response_schema=GeneratedEntityPromptResponse,
-                        temperature=0.2,
-                    ),
+                raw_json = GroqService.generate_json(
+                    system_instruction,
+                    "Generate schema change proposal based on roadmap updates."
                 )
-                raw = (response.text or '').strip()
-                validated = GeneratedEntityPromptResponse.model_validate_json(raw)
-                return validated.model_dump()
+                validated = RoadmapSchemaProposalSchema.model_validate(raw_json)
+                proposal_res = validated.model_dump()
             except Exception:
-                continue
+                pass
 
-        raise RuntimeError("Failed to generate entity from prompt.")
+        if not proposal_res:
+            api_key = getattr(settings, 'GEMINI_API_KEY', '') or ''
+            if api_key:
+                configured_model = getattr(settings, 'GEMINI_MODEL', 'gemini-3-flash-preview')
+                models_to_try = [configured_model] + [m for m in cls.FALLBACK_MODELS if m != configured_model]
+                client = genai.Client(api_key=api_key, http_options={'api_version': 'v1beta'})
+                for model_name in models_to_try:
+                    try:
+                        response = client.models.generate_content(
+                            model=model_name,
+                            contents=system_instruction,
+                            config=types.GenerateContentConfig(
+                                response_mime_type='application/json',
+                                response_schema=RoadmapSchemaProposalSchema,
+                                temperature=0.2,
+                            ),
+                        )
+                        raw = (response.text or '').strip()
+                        validated = RoadmapSchemaProposalSchema.model_validate_json(raw)
+                        proposal_res = validated.model_dump()
+                        break
+                    except Exception:
+                        continue
+        return proposal_res
+
+    @classmethod
+    def generate_entity_from_prompt(cls, prompt_text, schema_type='table', db_engine='PostgreSQL', current_entity=None, project=None):
+        from .models import ProjectCopilotSession
+        context = ""
+        if current_entity:
+            context += f"Current entity: name='{current_entity.get('name')}', description='{current_entity.get('description')}', columns={json.dumps(current_entity.get('columns', []))}\n"
+        if project:
+            context += f"Project: {project.name}, Tech Stack: {project.tech_stack or ''}\n"
+            if project.description:
+                context += f"Description: {project.description}\n"
+            if project.requirements:
+                context += f"Requirements: {project.requirements}\n"
+
+        roadmap_context = ""
+        if project and hasattr(project, 'roadmap') and project.roadmap:
+            rm = project.roadmap
+            phases_summary = []
+            for p in rm.phases.all().order_by('order'):
+                tasks = [t.title for m in p.milestones.all() for t in m.tasks.all()]
+                phases_summary.append(f"- Phase {p.order} ({p.title}): {tasks}")
+            if phases_summary:
+                roadmap_context = "Accepted Project Roadmap & Features:\n" + "\n".join(phases_summary) + "\n"
+
+        existing_schema_context = ""
+        if project:
+            from .models import ProjectDatabaseSchema
+            saved_schema = getattr(project, 'database_schema', None)
+            if not saved_schema:
+                saved_schema = ProjectDatabaseSchema.objects.filter(project=project).first()
+            if saved_schema and saved_schema.tables:
+                table_names = [t.get('name') for t in saved_schema.tables if t.get('name')]
+                existing_schema_context = f"Existing {saved_schema.schema_type} entities in saved schema: {table_names}\n"
+
+        session = None
+        confirmed_decisions_context = ""
+        schema_chat_history = ""
+        if project:
+            session, _ = ProjectCopilotSession.objects.get_or_create(project=project)
+            if session.confirmed_decisions:
+                confirmed_decisions_context = "Confirmed Architecture Decisions:\n" + "\n".join([f"- {d}" for d in session.confirmed_decisions]) + "\n"
+            if session.schema_messages:
+                hist_lines = []
+                for m in session.schema_messages[-8:]:
+                    role = m.get('role', 'user')
+                    content = m.get('content', '')
+                    if content:
+                        hist_lines.append(f"{role}: {content}")
+                if hist_lines:
+                    schema_chat_history = "Recent Schema Chat Context:\n" + "\n".join(hist_lines) + "\n"
+
+        system_instruction = (
+            f"You are DevPilot AI, a Principal Database Architect & Engineering Copilot.\n"
+            f"You are having a conversation with the technical team about this database {schema_type} ('table' or 'document') for {db_engine}.\n"
+            f"{context}\n"
+            f"{roadmap_context}\n"
+            f"{existing_schema_context}\n"
+            f"{confirmed_decisions_context}\n"
+            f"{schema_chat_history}\n"
+            f"User Message: {prompt_text}\n\n"
+            f"Mandatory Guidelines:\n"
+            f"- Output valid JSON matching GeneratedEntityPromptResponse schema.\n"
+            f"- explanation: Speak conversationally like a knowledgeable, helpful architect. Answer technical questions, explain design choices, or detail what was modified or added.\n"
+            f"- Read-only policy: Questions, advice, recommendations, and explanations must NOT mutate or overwrite saved data. Only generate entity changes when explicitly asked to add, edit, or model data.\n"
+            f"- primary_entity: The entity currently being edited ({current_entity.get('name') if current_entity else 'entity'}). Keep existing columns/fields unless the user asked to change them.\n"
+            f"- new_related_entities: If the user asked to create or connect a new table/collection, define full new entities. Otherwise keep this list empty [].\n"
+            f"- relationships: Define foreign key connections (source_table, target_table, relationship_type, foreign_key_column).\n"
+            f"- SQL vs NoSQL Modeling Accuracy:\n"
+            f"  * SQL ({db_engine}): normalized tables, typed columns (UUID, VARCHAR, INTEGER, TIMESTAMP, BOOLEAN), primary keys, foreign keys (references: '<target_table>.id'), constraints.\n"
+            f"  * NoSQL ({db_engine}): document collections, embedded data where appropriate or references (references: '<TargetCollection>._id'), NoSQL types (ObjectId, String, Number, Boolean, Date, Array<String>, Object).\n"
+            f"  * Explain meaningful modeling differences between relational tables and document collections when relevant."
+        )
+
+        res = cls._invoke_entity_llm(system_instruction, prompt_text)
+
+        if session:
+            session.schema_messages.append({'role': 'user', 'content': prompt_text})
+            session.schema_messages.append({'role': 'assistant', 'content': res.get('explanation', '')})
+            if len(session.schema_messages) > 30:
+                session.schema_messages = session.schema_messages[-30:]
+            session.save()
+
+        return res
+
+    @classmethod
+    def sync_proposal_with_roadmap(cls, project, roadmap):
+        from .models import ProjectCopilotSession, ProjectDatabaseSchema
+        project.refresh_from_db()
+        schema = getattr(project, 'database_schema', None)
+        if not schema:
+            schema = ProjectDatabaseSchema.objects.filter(project=project).first()
+        if not schema:
+            return
+
+        phases_summary = []
+        for p in roadmap.phases.all().order_by('order'):
+            tasks = [t.title for m in p.milestones.all() for t in m.tasks.all()]
+            phases_summary.append(f"Phase {p.order} ({p.title}): {tasks}")
+
+        roadmap_text = f"Roadmap Title: {roadmap.title}\nPhases & Tasks:\n" + "\n".join(phases_summary)
+        roadmap_version = str(roadmap.updated_at.isoformat()) if roadmap.updated_at else ""
+
+        session = getattr(project, 'copilot_session', None)
+        confirmed_decisions = session.confirmed_decisions if session else []
+        decisions_text = "\n".join([f"- {d}" for d in confirmed_decisions]) if confirmed_decisions else "None"
+
+        schema_type = schema.schema_type
+        db_engine = schema.db_engine
+        existing_tables = schema.tables or []
+        existing_names = [t.get('name') for t in existing_tables if t.get('name')]
+
+        system_instruction = (
+            f"You are a Principal Database Architect.\n"
+            f"Project: {project.name}\n"
+            f"Description: {project.description}\n"
+            f"Tech Stack: {project.tech_stack or ''}\n"
+            f"Requirements: {project.requirements or ''}\n"
+            f"Confirmed Project Invariants:\n{decisions_text}\n\n"
+            f"Current Database {schema_type.upper()} Schema ({db_engine}):\n"
+            f"Existing entities: {existing_names}\n"
+            f"Full existing entities data: {json.dumps(existing_tables)}\n\n"
+            f"Updated Project Roadmap:\n"
+            f"{roadmap_text}\n\n"
+            f"Task:\n"
+            f"Analyze if the updated roadmap changes genuinely introduce new data entities, models, or storage requirements that affect the database schema.\n"
+            f"Strict Architectural Rules:\n"
+            f"1. No Data-Model Impact Check:\n"
+            f"   - If the roadmap changes do NOT affect stored data (e.g. pure frontend styling, UI tweaks, CI/CD build pipeline, deployment on Render/cloud, testing/QA suites, reordering tasks without new data entities):\n"
+            f"     Set has_changes: false, leave proposed_tables empty [], and explain in summary that no schema changes are needed.\n"
+            f"     DO NOT invent unneeded tables or artificial schema migrations.\n"
+            f"2. Genuine Data-Model Impact:\n"
+            f"   - If the roadmap genuinely adds or modifies stored business data (e.g. adding authentication, file sharing/permissions, subscriptions/billing, comments, storage quota enforcement):\n"
+            f"     Set has_changes: true.\n"
+            f"     Preserve ALL existing unrelated entities, their IDs, columns, and relationships!\n"
+            f"     In proposed_tables, include the FULL list of tables/collections: keep existing unmodified tables completely intact with their original names and columns, and add/modify only the genuinely affected entities.\n"
+            f"     Provide a clear before_after_summary.\n"
+            f"     List affected entities in affected_entities with actions ('create', 'modify', 'delete', 'preserve').\n"
+            f"3. Accurate Modeling for {schema_type.upper()} ({db_engine}):\n"
+            f"   - Match target database engine rules accurately.\n"
+            f"4. Output strictly valid JSON conforming to RoadmapSchemaProposalSchema."
+        )
+
+        proposal_res = cls._invoke_proposal_llm(system_instruction)
+        if not proposal_res:
+            return
+
+        if proposal_res.get('has_changes'):
+            prop_tables = proposal_res.get('proposed_tables', [])
+            if prop_tables:
+                try:
+                    nodes, edges = cls.build_layout(schema.schema_type, prop_tables, schema.db_engine)
+                except Exception:
+                    nodes, edges = [], []
+                existing_node_positions = {n['id']: n.get('position') for n in (schema.nodes or []) if isinstance(n, dict) and 'id' in n and 'position' in n}
+                for node in nodes:
+                    if node['id'] in existing_node_positions and existing_node_positions[node['id']]:
+                        node['position'] = existing_node_positions[node['id']]
+                schema.pending_proposal = {
+                    'roadmap_version': roadmap_version,
+                    'has_changes': True,
+                    'summary': proposal_res.get('summary', 'Roadmap data model synchronization proposal.'),
+                    'before_after_summary': proposal_res.get('before_after_summary', ''),
+                    'modeling_notes': proposal_res.get('modeling_notes', ''),
+                    'affected_entities': proposal_res.get('affected_entities', []),
+                    'proposed_tables': prop_tables,
+                    'proposed_nodes': nodes,
+                    'proposed_edges': edges,
+                    'sql_ddl': proposal_res.get('sql_ddl') or schema.sql_ddl,
+                    'nosql_code': proposal_res.get('nosql_code') or schema.nosql_code,
+                    'code': proposal_res.get('sql_ddl') or proposal_res.get('nosql_code') or schema.code,
+                }
+            else:
+                schema.pending_proposal = {
+                    'roadmap_version': roadmap_version,
+                    'has_changes': False,
+                    'summary': proposal_res.get('summary', 'No schema changes required for this roadmap update.'),
+                    'before_after_summary': '',
+                    'affected_entities': [],
+                }
+        else:
+            schema.pending_proposal = {
+                'roadmap_version': roadmap_version,
+                'has_changes': False,
+                'summary': proposal_res.get('summary', 'No schema changes required for this roadmap update.'),
+                'before_after_summary': '',
+                'affected_entities': [],
+            }
+        schema.save()
+        return schema.pending_proposal
+
+    @classmethod
+    def apply_proposal(cls, project, client_roadmap_version=None):
+        from .models import ProjectDatabaseSchema
+        schema = getattr(project, 'database_schema', None)
+        if not schema:
+            schema = ProjectDatabaseSchema.objects.filter(project=project).first()
+        if not schema:
+            raise ValueError("No database schema found for this project.")
+        proposal = schema.pending_proposal or {}
+        if not proposal.get('has_changes'):
+            return schema
+
+        current_roadmap_version = str(project.roadmap.updated_at.isoformat()) if hasattr(project, 'roadmap') and project.roadmap and project.roadmap.updated_at else None
+        prop_roadmap_version = proposal.get('roadmap_version')
+
+        if current_roadmap_version and prop_roadmap_version and current_roadmap_version != prop_roadmap_version:
+            raise ValueError("STALE_PROPOSAL: The project roadmap was updated after this schema proposal was generated. Please refresh the proposal against the latest roadmap.")
+
+        if client_roadmap_version and current_roadmap_version and client_roadmap_version != current_roadmap_version:
+            raise ValueError("STALE_PROPOSAL: The project roadmap was updated after this schema proposal was generated. Please refresh the proposal against the latest roadmap.")
+
+        schema.tables = proposal.get('proposed_tables', schema.tables)
+        schema.nodes = proposal.get('proposed_nodes', schema.nodes)
+        schema.edges = proposal.get('proposed_edges', schema.edges)
+        if proposal.get('code'):
+            schema.code = proposal['code']
+        if proposal.get('sql_ddl'):
+            schema.sql_ddl = proposal['sql_ddl']
+        if proposal.get('nosql_code'):
+            schema.nosql_code = proposal['nosql_code']
+        schema.is_customized = True
+        schema.pending_proposal = {}
+        schema.save()
+        return schema
+
+    @classmethod
+    def dismiss_proposal(cls, project):
+        from .models import ProjectDatabaseSchema
+        schema = getattr(project, 'database_schema', None)
+        if not schema:
+            schema = ProjectDatabaseSchema.objects.filter(project=project).first()
+        if schema:
+            schema.pending_proposal = {}
+            schema.save()
+            return schema
+        return None
+
+    @classmethod
+    def refresh_proposal(cls, project):
+        if hasattr(project, 'roadmap') and project.roadmap:
+            cls.sync_proposal_with_roadmap(project, project.roadmap)
+        schema = getattr(project, 'database_schema', None)
+        if not schema:
+            from .models import ProjectDatabaseSchema
+            schema = ProjectDatabaseSchema.objects.filter(project=project).first()
+        return schema
 
 
 class RoadmapCopilotService:
@@ -1109,8 +1742,30 @@ class RoadmapCopilotService:
         return data
 
     @classmethod
-    def chat(cls, project, roadmap, prompt_text: str, conversation_history: list = None, active_phase_id: int = None, completed_task_ids: list = None):
+    def chat(cls, project, roadmap, prompt_text: str, conversation_history: list = None, active_phase_id: int = None, completed_task_ids: list = None, confirmed_decisions: list = None):
         completed_task_set = set(completed_task_ids or [])
+        if confirmed_decisions is None:
+            try:
+                session = getattr(project, 'copilot_session', None)
+                if session and session.confirmed_decisions:
+                    confirmed_decisions = session.confirmed_decisions
+            except Exception:
+                confirmed_decisions = []
+        confirmed_decisions = confirmed_decisions or []
+
+        decisions_context = ""
+        if confirmed_decisions:
+            decisions_bullets = "\n".join([f"- {d}" for d in confirmed_decisions])
+            decisions_context = (
+                f"\nStrict Confirmed Architectural Constraints & Decisions (Authoritative Invariants):\n"
+                f"{decisions_bullets}\n"
+                f"Critical Continuity Mandate:\n"
+                f"You MUST strictly preserve and adhere to these confirmed decisions across all turns.\n"
+                f"- If Render was chosen for deployment, NEVER reintroduce AWS, S3, ECS, or Kubernetes.\n"
+                f"- If monitoring or testing was excluded or avoided, NEVER reintroduce Prometheus, Grafana, Datadog, Jest, Cypress, or QA testing tasks.\n"
+                f"- Treat confirmed decisions as inviolable constraints for this project unless the user explicitly requests changing them.\n"
+            )
+
         phases_summary = []
         for phase in roadmap.phases.all().order_by('order'):
             m_list = []
@@ -1177,6 +1832,7 @@ class RoadmapCopilotService:
             f"Active Phases ({len(phases_summary)} total):\n"
             f"{json.dumps(phases_summary, indent=2)}\n"
             f"{active_phase_context}\n"
+            f"{decisions_context}\n"
             f"Mandatory Architectural Change Workflow for ALL Requests:\n"
             f"1. Context & Dependency Tracing Across Complete Roadmap:\n"
             f"   - Use the project's current saved details and complete roadmap as context.\n"
@@ -1206,11 +1862,15 @@ class RoadmapCopilotService:
         user_content = prompt_text
         if conversation_history:
             history_lines = []
-            for item in conversation_history[-6:]:
+            for item in conversation_history[-12:]:
                 role = item.get('role', 'user')
                 content = item.get('content', '')
-                history_lines.append(f"{role}: {content}")
-            user_content = f"Recent Conversation History:\n" + "\n".join(history_lines) + f"\n\nCurrent User Request: {prompt_text}"
+                if content:
+                    history_lines.append(f"{role}: {content}")
+            if history_lines:
+                user_content = f"Recent Conversation History:\n" + "\n".join(history_lines) + f"\n\nCurrent User Request: {prompt_text}"
+
+        current_roadmap_version = str(roadmap.updated_at.isoformat()) if roadmap and roadmap.updated_at else None
 
         if GroqService.is_available():
             try:
@@ -1221,8 +1881,11 @@ class RoadmapCopilotService:
                 normalized = cls._normalize_copilot_data(raw_json)
                 resolved = cls._resolve_target_phase(roadmap, normalized, active_phase=active_phase, prompt_text=prompt_text)
                 propagated = cls._apply_generic_roadmap_intent(roadmap, resolved, prompt_text=prompt_text, current_tech_stack=project.tech_stack)
+                propagated['roadmap_version'] = current_roadmap_version
                 validated = RoadmapCopilotResponse.model_validate(propagated)
-                return validated.model_dump()
+                res_dict = validated.model_dump()
+                res_dict['roadmap_version'] = current_roadmap_version
+                return res_dict
             except Exception:
                 pass
 
@@ -1251,8 +1914,11 @@ class RoadmapCopilotService:
                 normalized = cls._normalize_copilot_data(cleaned)
                 resolved = cls._resolve_target_phase(roadmap, normalized, active_phase=active_phase, prompt_text=prompt_text)
                 propagated = cls._apply_generic_roadmap_intent(roadmap, resolved, prompt_text=prompt_text, current_tech_stack=project.tech_stack)
+                propagated['roadmap_version'] = current_roadmap_version
                 validated = RoadmapCopilotResponse.model_validate(propagated)
-                return validated.model_dump()
+                res_dict = validated.model_dump()
+                res_dict['roadmap_version'] = current_roadmap_version
+                return res_dict
             except Exception:
                 continue
 

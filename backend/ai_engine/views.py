@@ -15,6 +15,7 @@ from .models import (
     RoadmapTask,
     RoadmapWhiteboard,
     ProjectDatabaseSchema,
+    ProjectCopilotSession,
 )
 from .serializers import (
     RoadmapSerializer,
@@ -110,10 +111,20 @@ class ProjectRoadmapGenerateView(APIView):
 class ProjectRoadmapChatCopilotView(APIView):
     permission_classes = [IsAuthenticated]
 
+    def get(self, request, project_id):
+        project = get_object_or_404(Project, id=project_id, user=request.user)
+        session, _ = ProjectCopilotSession.objects.get_or_create(project=project)
+        return Response({
+            'messages': session.messages,
+            'confirmed_decisions': session.confirmed_decisions,
+        }, status=status.HTTP_200_OK)
+
     def post(self, request, project_id):
         project = get_object_or_404(Project, id=project_id, user=request.user)
+        project.refresh_from_db()
         try:
             roadmap = project.roadmap
+            roadmap.refresh_from_db()
         except Roadmap.DoesNotExist:
             return Response({'error': 'Roadmap does not exist for this project. Please generate one first.'}, status=status.HTTP_404_NOT_FOUND)
 
@@ -121,7 +132,28 @@ class ProjectRoadmapChatCopilotView(APIView):
         if not prompt_text:
             return Response({'error': 'Prompt is required.'}, status=status.HTTP_400_BAD_REQUEST)
 
+        session, _ = ProjectCopilotSession.objects.get_or_create(project=project)
+        prompt_lower = prompt_text.lower()
+        if 'render' in prompt_lower and ('deploy' in prompt_lower or 'hosting' in prompt_lower):
+            dec = "Deployment: Render simple deployment. Avoid AWS and Kubernetes."
+            if dec not in session.confirmed_decisions:
+                session.confirmed_decisions.append(dec)
+        if any(w in prompt_lower for w in ['avoid', 'no ', 'remove', 'without']) and 'monitoring' in prompt_lower:
+            dec = "Monitoring: Exclude Prometheus, Grafana, Datadog, and monitoring tasks."
+            if dec not in session.confirmed_decisions:
+                session.confirmed_decisions.append(dec)
+        if any(w in prompt_lower for w in ['avoid', 'no ', 'remove', 'without']) and ('testing' in prompt_lower or 'tests' in prompt_lower):
+            dec = "Testing: Exclude QA test suites, Jest, Cypress, and testing tasks."
+            if dec not in session.confirmed_decisions:
+                session.confirmed_decisions.append(dec)
+
         conversation_history = request.data.get('conversation_history', [])
+        if not conversation_history and session.messages:
+            conversation_history = [
+                {'role': m.get('role', 'user'), 'content': m.get('content', '')}
+                for m in session.messages[-12:]
+            ]
+
         active_phase_id = request.data.get('active_phase_id')
         completed_task_ids = request.data.get('completed_task_ids', [])
 
@@ -133,7 +165,13 @@ class ProjectRoadmapChatCopilotView(APIView):
                 conversation_history=conversation_history,
                 active_phase_id=active_phase_id,
                 completed_task_ids=completed_task_ids,
+                confirmed_decisions=session.confirmed_decisions,
             )
+            session.messages.append({'role': 'user', 'content': prompt_text})
+            session.messages.append({'role': 'assistant', 'content': result.get('explanation', ''), 'response': result})
+            if len(session.messages) > 30:
+                session.messages = session.messages[-30:]
+            session.save()
             return Response(result, status=status.HTTP_200_OK)
         except ValueError as err:
             return Response({'error': str(err)}, status=status.HTTP_400_BAD_REQUEST)
@@ -284,6 +322,15 @@ class ProjectRoadmapApplyPhaseActionView(APIView):
         allowed_actions = ['add_phase', 'edit_phase', 'reorder_phase', 'delete_phase', 'update_tech_stack', 'update_roadmap']
         if action not in allowed_actions:
             return Response({'error': f"Unsupported action: '{action}'."}, status=status.HTTP_400_BAD_REQUEST)
+
+        client_roadmap_version = request.data.get('roadmap_version')
+        current_version = str(roadmap.updated_at.isoformat()) if roadmap.updated_at else None
+        if client_roadmap_version and current_version and client_roadmap_version != current_version:
+            return Response({
+                'error': 'This proposal is outdated because the roadmap was modified after it was created. Please review the updated roadmap and request a new proposal.',
+                'is_stale': True,
+            }, status=status.HTTP_409_CONFLICT)
+
         phase_data = request.data.get('phase_data') or {}
         target_phase_id = request.data.get('target_phase_id')
         target_phase_order = request.data.get('target_phase_order')
@@ -483,13 +530,23 @@ class ProjectRoadmapApplyPhaseActionView(APIView):
 
             _validate_and_sanitize_roadmap_consistency(roadmap)
 
+            session, _ = ProjectCopilotSession.objects.get_or_create(project=project)
+            summary = request.data.get('change_summary') or request.data.get('reason')
+            if summary and str(summary).strip() and str(summary).strip() not in session.confirmed_decisions:
+                session.confirmed_decisions.append(str(summary).strip())
+            if request.data.get('new_tech_stack'):
+                session.confirmed_decisions.append(f"Updated Tech Stack: {request.data.get('new_tech_stack')}")
+            session.save()
+
             roadmap.refresh_from_db()
             WhiteboardService.generate_initial_whiteboard(roadmap)
+            DatabaseSchemaService.sync_proposal_with_roadmap(project, roadmap)
             serializer = RoadmapSerializer(roadmap)
             return Response({
                 'message': 'Roadmap updated successfully.',
                 'roadmap': serializer.data,
                 'project': ProjectSerializer(project).data,
+                'roadmap_version': str(roadmap.updated_at.isoformat()) if roadmap.updated_at else None,
             }, status=status.HTTP_200_OK)
 
 
@@ -578,32 +635,19 @@ class ProjectDatabaseSchemaDetailView(APIView):
 
     def get(self, request, project_id):
         project = get_object_or_404(Project, id=project_id, user=request.user)
-        target_type = request.query_params.get('schema_type')
-
-        try:
-            if target_type:
-                schema = ProjectDatabaseSchema.objects.get(project=project, schema_type=target_type)
-            else:
-                schema = ProjectDatabaseSchema.objects.filter(project=project).order_by('-updated_at').first()
-                if not schema:
-                    raise ProjectDatabaseSchema.DoesNotExist()
-            serializer = ProjectDatabaseSchemaSerializer(schema)
-            return Response({'exists': True, 'schema': serializer.data}, status=status.HTTP_200_OK)
-        except ProjectDatabaseSchema.DoesNotExist:
+        schema = getattr(project, 'database_schema', None)
+        if not schema:
+            schema = ProjectDatabaseSchema.objects.filter(project=project).first()
+        if not schema:
             return Response({'exists': False, 'schema': None}, status=status.HTTP_200_OK)
+        return Response({'exists': True, 'schema': ProjectDatabaseSchemaSerializer(schema).data}, status=status.HTTP_200_OK)
 
     def put(self, request, project_id):
         project = get_object_or_404(Project, id=project_id, user=request.user)
-        target_type = request.data.get('schema_type') or request.query_params.get('schema_type')
-
-        try:
-            if target_type:
-                schema = ProjectDatabaseSchema.objects.get(project=project, schema_type=target_type)
-            else:
-                schema = ProjectDatabaseSchema.objects.filter(project=project).order_by('-updated_at').first()
-                if not schema:
-                    raise ProjectDatabaseSchema.DoesNotExist()
-        except ProjectDatabaseSchema.DoesNotExist:
+        schema = getattr(project, 'database_schema', None)
+        if not schema:
+            schema = ProjectDatabaseSchema.objects.filter(project=project).first()
+        if not schema:
             return Response(
                 {'error': 'Database schema does not exist for this project.'},
                 status=status.HTTP_404_NOT_FOUND,
@@ -633,10 +677,43 @@ class ProjectDatabaseSchemaGenerateView(APIView):
 
     def post(self, request, project_id):
         project = get_object_or_404(Project, id=project_id, user=request.user)
-        forced_type = request.data.get('schema_type')
+        action = request.data.get('action')
+
+        if action == 'confirm':
+            proposal = request.data.get('proposal') or {}
+            client_roadmap_version = request.data.get('roadmap_version') or proposal.get('roadmap_version')
+            client_schema_version = request.data.get('schema_version') or proposal.get('schema_version')
+            try:
+                schema = DatabaseSchemaService.apply_regeneration(
+                    project=project,
+                    proposal_data=proposal,
+                    client_roadmap_version=client_roadmap_version,
+                    client_schema_version=client_schema_version,
+                )
+                return Response({
+                    'message': 'Database schema saved successfully.',
+                    'schema': ProjectDatabaseSchemaSerializer(schema).data,
+                }, status=status.HTTP_200_OK)
+            except ValueError as err:
+                if 'STALE_REGENERATION' in str(err):
+                    return Response({'error': str(err), 'is_stale': True}, status=status.HTTP_409_CONFLICT)
+                return Response({'error': str(err)}, status=status.HTTP_400_BAD_REQUEST)
+            except Exception:
+                return Response({'error': 'Failed to save regenerated database schema.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        if action == 'preview':
+            try:
+                proposal = DatabaseSchemaService.generate_regeneration_proposal(project)
+                return Response(proposal, status=status.HTTP_200_OK)
+            except Exception:
+                return Response({'error': 'Failed to generate schema proposal.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
         try:
-            data = DatabaseSchemaService.generate_schema_data(project, forced_type=forced_type)
+            schema = DatabaseSchemaService.generate_initial_schema(project)
+            return Response({
+                'message': 'Database schema generated successfully.',
+                'schema': ProjectDatabaseSchemaSerializer(schema).data,
+            }, status=status.HTTP_201_CREATED)
         except ValueError as err:
             return Response({'error': str(err)}, status=status.HTTP_400_BAD_REQUEST)
         except Exception:
@@ -645,37 +722,32 @@ class ProjectDatabaseSchemaGenerateView(APIView):
                 status=status.HTTP_502_BAD_GATEWAY,
             )
 
-        schema_type = data.get('schema_type', 'table')
-        tables = data.get('tables', [])
-        db_engine = data.get('db_engine', 'PostgreSQL')
-        sql_ddl = data.get('sql_ddl', '')
-        nosql_code = data.get('nosql_code', '')
 
-        nodes, edges = DatabaseSchemaService.build_layout(schema_type, tables, db_engine)
+class ProjectDatabaseSchemaConfirmRegenerationView(APIView):
+    permission_classes = [IsAuthenticated]
 
-        with transaction.atomic():
-            schema, _ = ProjectDatabaseSchema.objects.update_or_create(
+    def post(self, request, project_id):
+        project = get_object_or_404(Project, id=project_id, user=request.user)
+        proposal = request.data.get('proposal') or {}
+        client_roadmap_version = request.data.get('roadmap_version') or proposal.get('roadmap_version')
+        client_schema_version = request.data.get('schema_version') or proposal.get('schema_version')
+        try:
+            schema = DatabaseSchemaService.apply_regeneration(
                 project=project,
-                schema_type=schema_type,
-                defaults={
-                    'db_engine': db_engine,
-                    'tables': tables,
-                    'nodes': nodes,
-                    'edges': edges,
-                    'sql_ddl': sql_ddl,
-                    'nosql_code': nosql_code,
-                    'is_customized': False,
-                },
+                proposal_data=proposal,
+                client_roadmap_version=client_roadmap_version,
+                client_schema_version=client_schema_version,
             )
-
-        serializer = ProjectDatabaseSchemaSerializer(schema)
-        return Response(
-            {
-                'message': 'Database schema generated successfully.',
-                'schema': serializer.data,
-            },
-            status=status.HTTP_201_CREATED,
-        )
+            return Response({
+                'message': 'Database schema saved successfully.',
+                'schema': ProjectDatabaseSchemaSerializer(schema).data,
+            }, status=status.HTTP_200_OK)
+        except ValueError as err:
+            if 'STALE_REGENERATION' in str(err):
+                return Response({'error': str(err), 'is_stale': True}, status=status.HTTP_409_CONFLICT)
+            return Response({'error': str(err)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception:
+            return Response({'error': 'Failed to save regenerated database schema.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 class ProjectDatabaseSchemaResetView(APIView):
@@ -683,16 +755,10 @@ class ProjectDatabaseSchemaResetView(APIView):
 
     def post(self, request, project_id):
         project = get_object_or_404(Project, id=project_id, user=request.user)
-        target_type = request.data.get('schema_type') or request.query_params.get('schema_type')
-
-        try:
-            if target_type:
-                schema = ProjectDatabaseSchema.objects.get(project=project, schema_type=target_type)
-            else:
-                schema = ProjectDatabaseSchema.objects.filter(project=project).order_by('-updated_at').first()
-                if not schema:
-                    raise ProjectDatabaseSchema.DoesNotExist()
-        except ProjectDatabaseSchema.DoesNotExist:
+        schema = getattr(project, 'database_schema', None)
+        if not schema:
+            schema = ProjectDatabaseSchema.objects.filter(project=project).first()
+        if not schema:
             return Response(
                 {'error': 'Database schema does not exist for this project.'},
                 status=status.HTTP_404_NOT_FOUND,
@@ -727,8 +793,12 @@ class ProjectDatabaseSchemaGenerateEntityView(APIView):
         if not prompt_text:
             return Response({'error': 'Prompt is required.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        schema_type = request.data.get('schema_type', 'table')
-        db_engine = request.data.get('db_engine') or ('MongoDB' if schema_type == 'document' else 'PostgreSQL')
+        schema = getattr(project, 'database_schema', None)
+        if not schema:
+            schema = ProjectDatabaseSchema.objects.filter(project=project).first()
+
+        schema_type = request.data.get('schema_type') or (schema.schema_type if schema else 'table')
+        db_engine = request.data.get('db_engine') or (schema.db_engine if schema else 'PostgreSQL')
         current_entity = request.data.get('current_entity')
 
         try:
@@ -759,3 +829,45 @@ class ProjectDatabaseSchemaGenerateEntityView(APIView):
                 {'error': 'AI service is temporarily unavailable.'},
                 status=status.HTTP_502_BAD_GATEWAY,
             )
+
+
+class ProjectDatabaseSchemaProposalApplyView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, project_id):
+        project = get_object_or_404(Project, id=project_id, user=request.user)
+        client_roadmap_version = request.data.get('roadmap_version')
+        try:
+            schema = DatabaseSchemaService.apply_proposal(project, client_roadmap_version=client_roadmap_version)
+            return Response(ProjectDatabaseSchemaSerializer(schema).data, status=status.HTTP_200_OK)
+        except ValueError as err:
+            if 'STALE_PROPOSAL' in str(err):
+                return Response({'error': str(err), 'is_stale': True}, status=status.HTTP_409_CONFLICT)
+            return Response({'error': str(err)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception:
+            return Response({'error': 'Failed to apply schema proposal.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class ProjectDatabaseSchemaProposalDismissView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, project_id):
+        project = get_object_or_404(Project, id=project_id, user=request.user)
+        try:
+            schema = DatabaseSchemaService.dismiss_proposal(project)
+            return Response(ProjectDatabaseSchemaSerializer(schema).data, status=status.HTTP_200_OK)
+        except Exception:
+            return Response({'error': 'Failed to dismiss proposal.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class ProjectDatabaseSchemaProposalRefreshView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, project_id):
+        project = get_object_or_404(Project, id=project_id, user=request.user)
+        try:
+            schema = DatabaseSchemaService.refresh_proposal(project)
+            return Response(ProjectDatabaseSchemaSerializer(schema).data, status=status.HTTP_200_OK)
+        except Exception:
+            return Response({'error': 'Failed to refresh proposal.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+

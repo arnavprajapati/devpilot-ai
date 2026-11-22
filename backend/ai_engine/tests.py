@@ -500,3 +500,504 @@ class RoadmapAPITests(APITestCase):
         self.assertEqual(res['action'], 'none')
         self.assertEqual(res['operation'], 'clarification')
         self.assertIn('?', res['explanation'])
+
+    def test_copilot_session_continuity_and_isolation(self):
+        from .models import ProjectCopilotSession
+        from ai_engine.services import RoadmapCopilotService
+
+        roadmap = Roadmap.objects.create(project=self.project1, title='Test Flow', summary='Flow test')
+        RoadmapPhase.objects.create(roadmap=roadmap, title='Phase 1: Foundation', duration='2 Weeks', order=1)
+
+        self.client.force_authenticate(user=self.user1)
+        chat_url = reverse('project-roadmap-chat', kwargs={'project_id': self.project1.id})
+
+        with patch.object(RoadmapCopilotService, 'chat') as mock_chat:
+            mock_chat.return_value = {
+                'explanation': 'I have scoped the plan for Render deployment and excluded monitoring/testing.',
+                'action': 'none',
+                'operation': 'explanation',
+                'roadmap_version': str(roadmap.updated_at.isoformat()),
+            }
+            resp = self.client.post(chat_url, data={
+                'prompt': 'We will deploy on Render simply. Avoid monitoring and testing completely.'
+            }, format='json')
+            self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+        session = ProjectCopilotSession.objects.get(project=self.project1)
+        self.assertEqual(len(session.messages), 2)
+        self.assertTrue(any('Render' in d for d in session.confirmed_decisions))
+        self.assertTrue(any('Monitoring' in d for d in session.confirmed_decisions))
+        self.assertTrue(any('Testing' in d for d in session.confirmed_decisions))
+
+        project2 = Project.objects.create(
+            user=self.user1,
+            name='Project 2 Isolation Check',
+            description='Second project',
+        )
+        Roadmap.objects.create(project=project2, title='P2 Roadmap', summary='P2')
+        p2_chat_url = reverse('project-roadmap-chat', kwargs={'project_id': project2.id})
+        p2_get_resp = self.client.get(p2_chat_url)
+        self.assertEqual(p2_get_resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(p2_get_resp.data['messages'], [])
+        self.assertEqual(p2_get_resp.data['confirmed_decisions'], [])
+
+    def test_stale_proposal_conflict_rejection(self):
+        roadmap = Roadmap.objects.create(project=self.project1, title='Test Flow', summary='Flow test')
+        p1 = RoadmapPhase.objects.create(roadmap=roadmap, title='Phase 1: Foundation', duration='2 Weeks', order=1)
+
+        stale_version = "2020-01-01T00:00:00"
+        apply_url = reverse('project-roadmap-apply-action', kwargs={'project_id': self.project1.id})
+        self.client.force_authenticate(user=self.user1)
+
+        resp = self.client.post(apply_url, data={
+            'action': 'edit_phase',
+            'target_phase_id': p1.id,
+            'phase_data': {'title': 'Phase 1: Modified Stale'},
+            'roadmap_version': stale_version,
+        }, format='json')
+
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+        self.assertTrue(resp.data.get('is_stale'))
+        p1.refresh_from_db()
+        self.assertEqual(p1.title, 'Phase 1: Foundation')
+
+    def test_schema_copilot_loads_roadmap_and_isolates_chat_history(self):
+        from .models import ProjectCopilotSession, ProjectDatabaseSchema
+        from ai_engine.services import DatabaseSchemaService
+
+        roadmap = Roadmap.objects.create(project=self.project1, title='Test Flow', summary='Flow test')
+        p1 = RoadmapPhase.objects.create(roadmap=roadmap, title='Phase 1: Foundation', duration='2 Weeks', order=1)
+        m1 = RoadmapMilestone.objects.create(phase=p1, title='Milestone 1', order=1)
+        RoadmapTask.objects.create(milestone=m1, title='Setup File Storage Table', order=1)
+
+        session = ProjectCopilotSession.objects.create(
+            project=self.project1,
+            messages=[{'role': 'user', 'content': 'Roadmap only question'}],
+            schema_messages=[{'role': 'user', 'content': 'Previous schema question'}],
+            confirmed_decisions=['Deployment on Render']
+        )
+
+        schema = ProjectDatabaseSchema.objects.create(
+            project=self.project1,
+            schema_type='table',
+            db_engine='PostgreSQL',
+            tables=[{'name': 'users', 'columns': [{'name': 'id', 'data_type': 'UUID', 'is_primary': True}]}],
+            nodes=[],
+            edges=[]
+        )
+
+        with patch.object(DatabaseSchemaService, '_invoke_entity_llm') as mock_llm:
+            mock_llm.return_value = {
+                'explanation': 'Added file storage schema entity.',
+                'primary_entity': {
+                    'name': 'drive_files',
+                    'columns': [
+                        {'name': 'id', 'data_type': 'UUID', 'is_primary': True},
+                        {'name': 'user_id', 'data_type': 'UUID', 'is_foreign': True, 'references': 'users.id'},
+                        {'name': 'file_name', 'data_type': 'VARCHAR(255)'}
+                    ]
+                },
+                'new_related_entities': [],
+                'relationships': [{'source_table': 'drive_files', 'target_table': 'users', 'relationship_type': 'many-to-one', 'foreign_key_column': 'user_id'}]
+            }
+            res = DatabaseSchemaService.generate_entity_from_prompt(
+                prompt_text="Create drive files table",
+                schema_type='table',
+                db_engine='PostgreSQL',
+                project=self.project1
+            )
+            self.assertEqual(res['primary_entity']['name'], 'drive_files')
+
+        session.refresh_from_db()
+        self.assertEqual(len(session.messages), 1)
+        self.assertEqual(session.messages[0]['content'], 'Roadmap only question')
+        self.assertEqual(len(session.schema_messages), 3)
+
+    def test_accepted_roadmap_change_creates_schema_proposal_and_applies_atomically(self):
+        from .models import ProjectDatabaseSchema
+        from ai_engine.services import DatabaseSchemaService
+
+        roadmap = Roadmap.objects.create(project=self.project1, title='Test Flow', summary='Flow test')
+        p1 = RoadmapPhase.objects.create(roadmap=roadmap, title='Phase 1: Storage', duration='2 Weeks', order=1)
+        m1 = RoadmapMilestone.objects.create(phase=p1, title='Bucket Uploads', order=1)
+        RoadmapTask.objects.create(milestone=m1, title='Store File Metadata in Database', order=1)
+
+        schema = ProjectDatabaseSchema.objects.create(
+            project=self.project1,
+            schema_type='table',
+            db_engine='PostgreSQL',
+            tables=[{'name': 'users', 'columns': [{'name': 'id', 'data_type': 'UUID', 'is_primary': True}]}],
+            nodes=[{'id': 'db-users', 'data': {'name': 'users'}}],
+            edges=[]
+        )
+
+        mock_proposal = {
+            'has_changes': True,
+            'summary': 'Add drive files table for storage',
+            'before_after_summary': 'Added drive_files table',
+            'modeling_notes': 'SQL normalized table',
+            'affected_entities': ['drive_files'],
+            'proposed_tables': [
+                {'name': 'users', 'columns': [{'name': 'id', 'data_type': 'UUID', 'is_primary': True}]},
+                {'name': 'drive_files', 'columns': [{'name': 'id', 'data_type': 'UUID', 'is_primary': True}, {'name': 'user_id', 'data_type': 'UUID', 'is_foreign': True, 'references': 'users.id'}]}
+            ],
+            'sql_ddl': 'CREATE TABLE drive_files (id UUID PRIMARY KEY);',
+            'nosql_code': ''
+        }
+
+        with patch.object(DatabaseSchemaService, '_invoke_proposal_llm', return_value=mock_proposal):
+            proposal = DatabaseSchemaService.sync_proposal_with_roadmap(self.project1, roadmap)
+
+        self.assertTrue(proposal.get('has_changes'))
+        self.assertIn('drive_files', proposal.get('affected_entities', []))
+
+        schema.refresh_from_db()
+        self.assertTrue(schema.pending_proposal.get('has_changes'))
+        self.assertEqual(schema.pending_proposal.get('roadmap_version'), str(roadmap.updated_at.isoformat()))
+
+        apply_url = reverse('project-database-schema-apply-proposal', kwargs={'project_id': self.project1.id})
+        self.client.force_authenticate(user=self.user1)
+        apply_resp = self.client.post(apply_url, data={
+            'schema_type': 'table',
+            'roadmap_version': schema.pending_proposal.get('roadmap_version'),
+        }, format='json')
+        self.assertEqual(apply_resp.status_code, status.HTTP_200_OK)
+
+        schema.refresh_from_db()
+        self.assertFalse(schema.pending_proposal.get('has_changes', False))
+        table_names = [t['name'] for t in schema.tables]
+        self.assertIn('users', table_names)
+        self.assertIn('drive_files', table_names)
+
+    def test_accepted_roadmap_change_without_schema_impact(self):
+        from .models import ProjectDatabaseSchema
+        from ai_engine.services import DatabaseSchemaService
+
+        roadmap = Roadmap.objects.create(project=self.project1, title='Test Flow', summary='Flow test')
+        p1 = RoadmapPhase.objects.create(roadmap=roadmap, title='Phase 1: DevOps', duration='1 Week', order=1)
+        m1 = RoadmapMilestone.objects.create(phase=p1, title='CI/CD Pipeline', order=1)
+        RoadmapTask.objects.create(milestone=m1, title='Configure GitHub Actions and Linter', order=1)
+
+        schema = ProjectDatabaseSchema.objects.create(
+            project=self.project1,
+            schema_type='table',
+            db_engine='PostgreSQL',
+            tables=[{'name': 'users', 'columns': [{'name': 'id', 'data_type': 'UUID', 'is_primary': True}]}],
+            nodes=[],
+            edges=[]
+        )
+
+        mock_no_impact = {
+            'has_changes': False,
+            'summary': 'No schema changes needed for CI/CD pipeline',
+            'before_after_summary': '',
+            'modeling_notes': '',
+            'affected_entities': [],
+            'proposed_tables': [],
+            'sql_ddl': '',
+            'nosql_code': ''
+        }
+
+        with patch.object(DatabaseSchemaService, '_invoke_proposal_llm', return_value=mock_no_impact):
+            proposal = DatabaseSchemaService.sync_proposal_with_roadmap(self.project1, roadmap)
+
+        self.assertFalse(proposal.get('has_changes'))
+
+    def test_stale_schema_proposal_returns_409_conflict(self):
+        from .models import ProjectDatabaseSchema
+
+        roadmap = Roadmap.objects.create(project=self.project1, title='Test Flow', summary='Flow test')
+        schema = ProjectDatabaseSchema.objects.create(
+            project=self.project1,
+            schema_type='table',
+            db_engine='PostgreSQL',
+            tables=[{'name': 'users', 'columns': []}],
+            nodes=[],
+            edges=[],
+            pending_proposal={
+                'has_changes': True,
+                'roadmap_version': '2020-01-01T00:00:00',
+                'summary': 'Add files table',
+                'entities': [{'name': 'files', 'columns': []}]
+            }
+        )
+
+        apply_url = reverse('project-database-schema-apply-proposal', kwargs={'project_id': self.project1.id})
+        self.client.force_authenticate(user=self.user1)
+        apply_resp = self.client.post(apply_url, data={
+            'schema_type': 'table',
+            'roadmap_version': '2020-01-01T00:00:00',
+        }, format='json')
+        self.assertEqual(apply_resp.status_code, status.HTTP_409_CONFLICT)
+        self.assertTrue(apply_resp.data.get('is_stale'))
+
+    def test_regenerate_builds_single_schema_proposal(self):
+        from .models import ProjectDatabaseSchema
+        from ai_engine.services import DatabaseSchemaService
+
+        roadmap = Roadmap.objects.create(project=self.project1, title='Test Flow', summary='Flow test')
+        p1 = RoadmapPhase.objects.create(roadmap=roadmap, title='Phase 1: Cloud Storage', duration='2 Weeks', order=1)
+        m1 = RoadmapMilestone.objects.create(phase=p1, title='Bucket Infrastructure', order=1)
+        RoadmapTask.objects.create(milestone=m1, title='S3 Upload API and Quota Tracking', order=1)
+
+        ProjectDatabaseSchema.objects.create(
+            project=self.project1,
+            schema_type='table',
+            db_engine='PostgreSQL',
+            tables=[{'name': 'users', 'columns': [{'name': 'id', 'data_type': 'UUID', 'is_primary': True}]}],
+            nodes=[],
+            edges=[]
+        )
+
+        mock_proposal = {
+            'summary': 'Cloud file storage domain with users, files, folders, and storage quotas.',
+            'rationale': 'PostgreSQL schema handles transactional quotas and file relationships.',
+            'db_engine': 'PostgreSQL',
+            'schema_type': 'table',
+            'tables': [
+                {'name': 'users', 'description': 'User accounts', 'columns': [{'name': 'id', 'data_type': 'UUID', 'is_primary': True}, {'name': 'email', 'data_type': 'VARCHAR(255)'}]},
+                {'name': 'drive_files', 'description': 'Uploaded files', 'columns': [{'name': 'id', 'data_type': 'UUID', 'is_primary': True}, {'name': 'user_id', 'data_type': 'UUID', 'is_foreign': True, 'references': 'users.id'}, {'name': 'size_bytes', 'data_type': 'INTEGER'}]}
+            ],
+            'code': 'CREATE TABLE users (id UUID PRIMARY KEY); CREATE TABLE drive_files (id UUID PRIMARY KEY, user_id UUID REFERENCES users(id));',
+            'added_entities': ['drive_files'],
+            'modified_entities': [],
+            'preserved_entities': ['users'],
+            'removed_entities': [],
+            'modeling_notes': 'SQL normalized with foreign key references'
+        }
+
+        with patch.object(DatabaseSchemaService, '_invoke_single_proposal_llm', return_value=mock_proposal):
+            proposal = DatabaseSchemaService.generate_regeneration_proposal(self.project1)
+
+        self.assertEqual(proposal['summary'], 'Cloud file storage domain with users, files, folders, and storage quotas.')
+        self.assertEqual(proposal['db_engine'], 'PostgreSQL')
+        self.assertEqual(proposal['schema_type'], 'table')
+        self.assertIn('drive_files', [t['name'] for t in proposal['tables']])
+        self.assertIn('users', proposal['preserved_entities'])
+        self.assertIn('drive_files', proposal['added_entities'])
+
+    def test_confirm_regeneration_saves_single_schema_and_detects_stale_roadmap(self):
+        from .models import ProjectDatabaseSchema
+
+        roadmap = Roadmap.objects.create(project=self.project1, title='Test Flow', summary='Flow test')
+        RoadmapPhase.objects.create(roadmap=roadmap, title='Phase 1: Storage', duration='2 Weeks', order=1)
+
+        saved_schema = ProjectDatabaseSchema.objects.create(
+            project=self.project1,
+            schema_type='table',
+            db_engine='PostgreSQL',
+            tables=[{'name': 'users', 'columns': [{'name': 'id', 'data_type': 'UUID', 'is_primary': True}]}],
+            nodes=[{'id': 'db-users', 'position': {'x': 100, 'y': 150}}],
+            edges=[]
+        )
+
+        mock_proposal = {
+            'summary': 'File storage architecture',
+            'rationale': 'Unified data model',
+            'db_engine': 'PostgreSQL',
+            'schema_type': 'table',
+            'roadmap_version': str(roadmap.updated_at.isoformat()),
+            'schema_version': str(saved_schema.updated_at.isoformat()),
+            'tables': [
+                {'name': 'users', 'columns': [{'name': 'id', 'data_type': 'UUID', 'is_primary': True}]},
+                {'name': 'files', 'columns': [{'name': 'id', 'data_type': 'UUID', 'is_primary': True}, {'name': 'user_id', 'data_type': 'UUID', 'is_foreign': True, 'references': 'users.id'}]}
+            ],
+            'added_entities': ['files'],
+            'modified_entities': [],
+            'preserved_entities': ['users'],
+            'removed_entities': [],
+            'code': 'CREATE TABLE files (id UUID PRIMARY KEY);',
+            'modeling_notes': 'Normalized relational storage'
+        }
+
+        confirm_url = reverse('project-database-schema-confirm-regeneration', kwargs={'project_id': self.project1.id})
+        self.client.force_authenticate(user=self.user1)
+
+        resp = self.client.post(confirm_url, data={
+            'proposal': mock_proposal,
+            'roadmap_version': mock_proposal['roadmap_version'],
+            'schema_version': mock_proposal['schema_version'],
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+        saved_schema.refresh_from_db()
+        self.assertEqual(len(saved_schema.tables), 2)
+        self.assertIn('files', [t['name'] for t in saved_schema.tables])
+        user_node = next(n for n in saved_schema.nodes if n['id'] == 'db-users')
+        self.assertEqual(user_node['position'], {'x': 100, 'y': 150})
+
+        stale_resp = self.client.post(confirm_url, data={
+            'proposal': mock_proposal,
+            'roadmap_version': '2019-01-01T00:00:00',
+            'schema_version': mock_proposal['schema_version'],
+        }, format='json')
+        self.assertEqual(stale_resp.status_code, status.HTTP_409_CONFLICT)
+        self.assertTrue(stale_resp.data.get('is_stale'))
+
+    def test_project_isolation_in_regeneration(self):
+        from .models import ProjectDatabaseSchema
+        from ai_engine.services import DatabaseSchemaService
+
+        project_chat = Project.objects.create(
+            user=self.user1,
+            name='TeamChat Messenger',
+            description='A real-time messaging application with channels and direct messages.',
+            tech_stack='React, Node.js, Socket.io, MongoDB, Redis',
+            requirements='Group chat channels, private messaging, read receipts.',
+        )
+        ProjectDatabaseSchema.objects.create(
+            project=project_chat,
+            schema_type='document',
+            db_engine='MongoDB',
+            tables=[
+                {'name': 'channels', 'columns': [{'name': '_id', 'data_type': 'ObjectId', 'is_primary': True}]},
+                {'name': 'messages', 'columns': [{'name': '_id', 'data_type': 'ObjectId', 'is_primary': True}]},
+            ],
+            nodes=[],
+            edges=[]
+        )
+
+        project_storage = Project.objects.create(
+            user=self.user1,
+            name='CloudVault Storage',
+            description='Cloud storage platform for uploading and sharing documents and files.',
+            tech_stack='React, Node.js, AWS S3, PostgreSQL',
+            requirements='Upload files, organize into directories, share public links.',
+        )
+        ProjectDatabaseSchema.objects.create(
+            project=project_storage,
+            schema_type='table',
+            db_engine='PostgreSQL',
+            tables=[
+                {'name': 'storage_drives', 'columns': [{'name': 'id', 'data_type': 'UUID', 'is_primary': True}]},
+                {'name': 'vault_files', 'columns': [{'name': 'id', 'data_type': 'UUID', 'is_primary': True}]},
+            ],
+            nodes=[],
+            edges=[]
+        )
+
+        storage_proposal = DatabaseSchemaService.generate_regeneration_proposal(project_storage)
+        storage_names = [t['name'].lower() for t in storage_proposal['tables']]
+
+        self.assertIn('storage_drives', storage_names)
+        self.assertIn('vault_files', storage_names)
+        self.assertNotIn('channels', storage_names)
+        self.assertNotIn('messages', storage_names)
+
+        chat_proposal = DatabaseSchemaService.generate_regeneration_proposal(project_chat)
+        chat_names = [t['name'].lower() for t in chat_proposal['tables']]
+
+        self.assertIn('channels', chat_names)
+        self.assertIn('messages', chat_names)
+        self.assertNotIn('storage_drives', chat_names)
+        self.assertNotIn('vault_files', chat_names)
+
+    def test_dynamic_schema_comparison_preserves_and_adds(self):
+        from .models import ProjectDatabaseSchema
+        from ai_engine.services import DatabaseSchemaService
+
+        proj = Project.objects.create(
+            user=self.user1,
+            name='ProjectHub Specs',
+            description='Software planning workspace with specs and documents.',
+            tech_stack='React, Node.js, PostgreSQL',
+            requirements='Document management, specs builder, team roles.',
+        )
+        ProjectDatabaseSchema.objects.create(
+            project=proj,
+            schema_type='table',
+            db_engine='PostgreSQL',
+            tables=[
+                {'name': 'documents', 'columns': [{'name': 'id', 'data_type': 'UUID', 'is_primary': True}]},
+                {'name': 'specifications', 'columns': [{'name': 'id', 'data_type': 'UUID', 'is_primary': True}]},
+            ],
+            nodes=[],
+            edges=[]
+        )
+
+        proposal = DatabaseSchemaService.generate_regeneration_proposal(proj)
+        preserved = [name.lower() for name in proposal['preserved_entities']]
+        added = [name.lower() for name in proposal['added_entities']]
+
+        self.assertIn('documents', preserved)
+        self.assertIn('specifications', preserved)
+        self.assertNotIn('documents', added)
+        self.assertNotIn('specifications', added)
+
+    def test_dynamic_technology_determination_and_unified_schema(self):
+        from ai_engine.services import DatabaseSchemaService
+
+        p_mongo = Project.objects.create(
+            user=self.user1,
+            name='NoSQL Project',
+            description='MongoDB app',
+            tech_stack='Node.js, Express, MongoDB, Mongoose',
+        )
+        engine_m, type_m, conflict_m, _ = DatabaseSchemaService.determine_database_technology(p_mongo)
+        self.assertEqual(engine_m, 'MongoDB')
+        self.assertEqual(type_m, 'document')
+        self.assertFalse(conflict_m)
+
+        p_pg = Project.objects.create(
+            user=self.user1,
+            name='SQL Project',
+            description='PostgreSQL app',
+            tech_stack='Python, Django, PostgreSQL',
+        )
+        engine_p, type_p, conflict_p, _ = DatabaseSchemaService.determine_database_technology(p_pg)
+        self.assertEqual(engine_p, 'PostgreSQL')
+        self.assertEqual(type_p, 'table')
+        self.assertFalse(conflict_p)
+
+        p_mysql = Project.objects.create(
+            user=self.user1,
+            name='MySQL Project',
+            description='Laravel MySQL app',
+            tech_stack='PHP, Laravel, MySQL',
+        )
+        engine_my, type_my, conflict_my, _ = DatabaseSchemaService.determine_database_technology(p_mysql)
+        self.assertEqual(engine_my, 'MySQL')
+        self.assertEqual(type_my, 'table')
+        self.assertFalse(conflict_my)
+
+        p_conflict = Project.objects.create(
+            user=self.user1,
+            name='Conflict Project',
+            description='Dual database app',
+            tech_stack='PostgreSQL, MongoDB',
+        )
+        engine_c, type_c, conflict_c, conflict_data = DatabaseSchemaService.determine_database_technology(p_conflict)
+        self.assertTrue(conflict_c)
+        self.assertIn('PostgreSQL', conflict_data.get('detected_engines', []))
+        self.assertIn('MongoDB', conflict_data.get('detected_engines', []))
+
+    def test_preservation_of_unrelated_existing_entities(self):
+        from .models import ProjectDatabaseSchema
+        from ai_engine.services import DatabaseSchemaService
+
+        proj = Project.objects.create(
+            user=self.user1,
+            name='Analytics Engine',
+            description='Telemetry ingestion and metrics reporting platform.',
+            tech_stack='React, Go, PostgreSQL',
+            requirements='Ingest time-series events, generate metrics aggregations.',
+        )
+        ProjectDatabaseSchema.objects.create(
+            project=proj,
+            schema_type='table',
+            db_engine='PostgreSQL',
+            tables=[
+                {'name': 'custom_audit_logs', 'columns': [{'name': 'id', 'data_type': 'UUID', 'is_primary': True}]},
+                {'name': 'api_access_keys', 'columns': [{'name': 'id', 'data_type': 'UUID', 'is_primary': True}]},
+            ],
+            nodes=[],
+            edges=[]
+        )
+
+        proposal = DatabaseSchemaService.generate_regeneration_proposal(proj)
+        names = [t['name'].lower() for t in proposal['tables']]
+
+        self.assertIn('custom_audit_logs', names)
+        self.assertIn('api_access_keys', names)
+        self.assertNotIn('messages', names)
+        self.assertNotIn('channels', names)
