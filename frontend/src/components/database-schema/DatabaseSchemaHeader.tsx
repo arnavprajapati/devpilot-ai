@@ -19,6 +19,7 @@ interface DatabaseSchemaHeaderProps {
   schemaType: 'table' | 'document';
   dbEngine: string;
   hasUnsavedChanges: boolean;
+  hasConflict?: boolean;
   isSaving: boolean;
   historyLength: number;
   redoStackLength: number;
@@ -31,7 +32,6 @@ interface DatabaseSchemaHeaderProps {
   onPaste: () => void;
   onEditSelected: () => void;
   onDeleteSelected: () => void;
-  onSwitchType: (type: 'table' | 'document') => void;
   onAddEntity: () => void;
   onOpenExport: () => void;
   onResetLayout: () => void;
@@ -42,6 +42,7 @@ export function DatabaseSchemaHeader({
   schemaType,
   dbEngine,
   hasUnsavedChanges,
+  hasConflict,
   isSaving,
   historyLength,
   redoStackLength,
@@ -54,7 +55,6 @@ export function DatabaseSchemaHeader({
   onPaste,
   onEditSelected,
   onDeleteSelected,
-  onSwitchType,
   onAddEntity,
   onOpenExport,
   onResetLayout,
@@ -71,45 +71,38 @@ export function DatabaseSchemaHeader({
     >
       <div className="flex items-center gap-2 sm:gap-3 overflow-x-auto py-0.5">
         <div
-          className={`inline-flex items-center gap-1 p-1 rounded-xl border ${
+          className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-xl border ${
             isDark
-              ? 'bg-[#18191D] border-[#242321]'
-              : 'bg-[#F7F3EA] border-[#E8E1D5]'
+              ? 'bg-[#18191D] border-[#242321] text-[#F5F3EF]'
+              : 'bg-[#F7F3EA] border-[#E8E1D5] text-[#171717]'
           }`}
         >
-          <button
-            type="button"
-            onClick={() => onSwitchType('table')}
-            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
-              schemaType === 'table'
-                ? isDark
-                  ? 'bg-[#FFC900] text-[#08090B] font-bold shadow-xs'
-                  : 'bg-[#D9A300] text-white font-bold shadow-xs'
-                : isDark
-                ? 'text-[#A6A4A0] hover:text-[#F5F3EF]'
-                : 'text-[#6B665E] hover:text-[#171717]'
+          {schemaType === 'document' ? (
+            <FileCode2 className="w-4 h-4 text-emerald-500" />
+          ) : (
+            <Database className="w-4 h-4 text-amber-500" />
+          )}
+          <span className="text-xs font-bold">{dbEngine}</span>
+          <span
+            className={`text-[10px] uppercase font-bold tracking-wider px-2 py-0.5 rounded-full ${
+              isDark
+                ? 'bg-white/10 text-[#A6A4A0]'
+                : 'bg-black/5 text-[#6B665E]'
             }`}
           >
-            <Database className="w-3.5 h-3.5" />
-            <span>Relational Tables (SQL)</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => onSwitchType('document')}
-            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
-              schemaType === 'document'
-                ? isDark
-                  ? 'bg-[#FFC900] text-[#08090B] font-bold shadow-xs'
-                  : 'bg-[#D9A300] text-white font-bold shadow-xs'
-                : isDark
-                ? 'text-[#A6A4A0] hover:text-[#F5F3EF]'
-                : 'text-[#6B665E] hover:text-[#171717]'
-            }`}
-          >
-            <FileCode2 className="w-3.5 h-3.5" />
-            <span>Document Collections (NoSQL)</span>
-          </button>
+            {schemaType === 'document' ? 'NoSQL Document Schema' : 'Relational SQL Schema'}
+          </span>
         </div>
+
+        {hasConflict && (
+          <span
+            title="Conflicting database technologies detected in project specifications. Both representations were preserved."
+            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-semibold border border-amber-500/40 bg-amber-500/10 text-amber-600 dark:text-amber-400"
+          >
+            <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
+            <span>Legacy Conflict Preserved</span>
+          </span>
+        )}
 
         <span
           className={`hidden lg:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-semibold border ${

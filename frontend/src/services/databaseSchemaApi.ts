@@ -16,6 +16,41 @@ export interface SchemaTable {
   columns: SchemaColumn[];
 }
 
+export interface DatabaseSchemaProposalDiff {
+  summary: string;
+  rationale: string;
+  db_engine: string;
+  schema_type: 'table' | 'document';
+  tables: SchemaTable[];
+  added_entities: string[];
+  modified_entities: string[];
+  preserved_entities: string[];
+  removed_entities: string[];
+  code: string;
+  modeling_notes?: string;
+  roadmap_version?: string;
+  schema_version?: string;
+  has_conflict?: boolean;
+  conflict_data?: any;
+}
+
+export interface DatabaseSchemaProposal {
+  has_changes: boolean;
+  roadmap_version?: string;
+  summary?: string;
+  rationale?: string;
+  before_after_summary?: string;
+  affected_entities?: string[];
+  modeling_notes?: string;
+  proposed_tables?: SchemaTable[];
+  proposed_nodes?: any[];
+  proposed_edges?: any[];
+  code?: string;
+  sql_ddl?: string;
+  nosql_code?: string;
+  created_at?: string;
+}
+
 export interface DatabaseSchema {
   id: number;
   project: number;
@@ -25,9 +60,13 @@ export interface DatabaseSchema {
   nodes: any[];
   edges: any[];
   viewport?: { x: number; y: number; zoom: number };
+  code?: string;
   sql_ddl?: string;
   nosql_code?: string;
   is_customized?: boolean;
+  pending_proposal?: DatabaseSchemaProposal | null;
+  has_conflict?: boolean;
+  conflict_data?: any;
   created_at: string;
   updated_at: string;
 }
@@ -52,17 +91,43 @@ export interface GenerateEntityPromptResponse {
 }
 
 export const databaseSchemaApi = {
-  getSchema: (projectId: number, schemaType?: 'table' | 'document') => {
-    const query = schemaType ? `?schema_type=${schemaType}` : '';
-    return apiRequest<DatabaseSchemaDetailResponse>(`/api/projects/${projectId}/database-schema/${query}`);
-  },
+  getSchema: (projectId: number) =>
+    apiRequest<DatabaseSchemaDetailResponse>(`/api/projects/${projectId}/database-schema/`),
 
-  generateSchema: (projectId: number, schemaType?: 'table' | 'document') =>
+  generateSchema: (projectId: number) =>
     apiRequest<{ message: string; schema: DatabaseSchema }>(
       `/api/projects/${projectId}/database-schema/generate/`,
       {
         method: 'POST',
-        body: JSON.stringify(schemaType ? { schema_type: schemaType } : {}),
+        body: JSON.stringify({}),
+      }
+    ),
+
+  previewRegeneration: (projectId: number) =>
+    apiRequest<DatabaseSchemaProposalDiff>(
+      `/api/projects/${projectId}/database-schema/generate/`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ action: 'preview' }),
+      }
+    ),
+
+  confirmRegeneration: (
+    projectId: number,
+    payload: {
+      proposal: DatabaseSchemaProposalDiff;
+      roadmap_version?: string;
+      schema_version?: string;
+    }
+  ) =>
+    apiRequest<{
+      message: string;
+      schema: DatabaseSchema;
+    }>(
+      `/api/projects/${projectId}/database-schema/confirm-regeneration/`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
       }
     ),
 
@@ -88,6 +153,7 @@ export const databaseSchemaApi = {
       `/api/projects/${projectId}/database-schema/reset/`,
       {
         method: 'POST',
+        body: JSON.stringify({}),
       }
     ),
 
@@ -95,7 +161,7 @@ export const databaseSchemaApi = {
     projectId: number,
     payload: {
       prompt: string;
-      schema_type: 'table' | 'document';
+      schema_type?: 'table' | 'document';
       db_engine?: string;
       current_entity?: any;
     }
@@ -105,6 +171,38 @@ export const databaseSchemaApi = {
       {
         method: 'POST',
         body: JSON.stringify(payload),
+      }
+    ),
+
+  applyProposal: (
+    projectId: number,
+    payload?: {
+      roadmap_version?: string;
+    }
+  ) =>
+    apiRequest<DatabaseSchema>(
+      `/api/projects/${projectId}/database-schema/apply-proposal/`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload || {}),
+      }
+    ),
+
+  dismissProposal: (projectId: number) =>
+    apiRequest<DatabaseSchema>(
+      `/api/projects/${projectId}/database-schema/dismiss-proposal/`,
+      {
+        method: 'POST',
+        body: JSON.stringify({}),
+      }
+    ),
+
+  refreshProposal: (projectId: number) =>
+    apiRequest<DatabaseSchema>(
+      `/api/projects/${projectId}/database-schema/refresh-proposal/`,
+      {
+        method: 'POST',
+        body: JSON.stringify({}),
       }
     ),
 };

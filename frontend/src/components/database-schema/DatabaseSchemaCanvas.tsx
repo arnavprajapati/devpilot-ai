@@ -14,12 +14,13 @@ import '@xyflow/react/dist/style.css';
 import { Database, Sparkles, AlertCircle } from 'lucide-react';
 import { useTheme } from '../../context/ThemeContext';
 import type { Project } from '../../services/projectsApi';
-import { databaseSchemaApi, type DatabaseSchema, type SchemaRelationship } from '../../services/databaseSchemaApi';
+import { databaseSchemaApi, type DatabaseSchema, type SchemaRelationship, type DatabaseSchemaProposalDiff } from '../../services/databaseSchemaApi';
 import { TableNode } from './TableNode';
 import { DocumentNode } from './DocumentNode';
 import { DatabaseSchemaHeader } from './DatabaseSchemaHeader';
 import { ExportCodeModal } from './ExportCodeModal';
 import { EditEntityModal, type EditableEntity } from './EditEntityModal';
+import { RegenerateDiffModal } from './RegenerateDiffModal';
 
 interface DatabaseSchemaCanvasProps {
   project: Project;
@@ -39,10 +40,7 @@ export function DatabaseSchemaCanvas({
   const reactFlowInstance = useRef<any>(null);
   const dragStartSnapshot = useRef<{ nodes: Node[]; edges: Edge[] } | null>(null);
 
-  const schemaCache = useRef<Record<'table' | 'document', DatabaseSchema | null>>({
-    table: null,
-    document: null,
-  });
+  const schemaCache = useRef<DatabaseSchema | null>(null);
 
   const [schema, setSchema] = useState<DatabaseSchema | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -51,6 +49,12 @@ export function DatabaseSchemaCanvas({
   const [error, setError] = useState<string | null>(null);
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [isExportOpen, setIsExportOpen] = useState(false);
+  const [isApplyingProposal, setIsApplyingProposal] = useState(false);
+  const [proposalStaleError, setProposalStaleError] = useState<string | null>(null);
+  const [regenProposal, setRegenProposal] = useState<DatabaseSchemaProposalDiff | null>(null);
+  const [isRegenDiffOpen, setIsRegenDiffOpen] = useState(false);
+  const [isSavingRegen, setIsSavingRegen] = useState(false);
+  const [regenStaleError, setRegenStaleError] = useState<string | null>(null);
 
   const [history, setHistory] = useState<{ nodes: Node[]; edges: Edge[] }[]>([]);
   const [redoStack, setRedoStack] = useState<{ nodes: Node[]; edges: Edge[] }[]>([]);
@@ -78,6 +82,9 @@ export function DatabaseSchemaCanvas({
     setRedoStack([]);
   }, []);
 
+  const schemaRef = useRef<DatabaseSchema | null>(null);
+  schemaRef.current = schema;
+
   const handleOpenEditForNode = useCallback(
     (target: Node | string) => {
       const id = typeof target === 'string' ? target : target.id;
@@ -87,11 +94,11 @@ export function DatabaseSchemaCanvas({
         id: latest.id,
         name: String(latest.data?.name || ''),
         description: String(latest.data?.description || ''),
-        schemaType: (latest.data?.schemaType || schema?.schema_type || 'table') as 'table' | 'document',
+        schemaType: (latest.data?.schemaType || schemaRef.current?.schema_type || 'table') as 'table' | 'document',
         columns: latest.data?.columns ? JSON.parse(JSON.stringify(latest.data.columns)) : [],
       });
     },
-    [schema?.schema_type]
+    []
   );
 
   const handleDeleteNode = useCallback((nodeId: string) => {
@@ -121,13 +128,13 @@ export function DatabaseSchemaCanvas({
     const res = await databaseSchemaApi.getSchema(project.id);
     if (res.data?.exists && res.data.schema) {
       setSchema(res.data.schema);
+      schemaCache.current = res.data.schema;
       const readyNodes = attachNodeHandlers(res.data.schema.nodes || []);
       setNodes(readyNodes);
       setEdges(res.data.schema.edges || []);
       setHasUnsavedChanges(false);
       setHistory([]);
       setRedoStack([]);
-      schemaCache.current[res.data.schema.schema_type as 'table' | 'document'] = res.data.schema;
       setTimeout(() => {
         reactFlowInstance.current?.fitView?.({ padding: 0.2 });
       }, 80);
@@ -140,80 +147,49 @@ export function DatabaseSchemaCanvas({
   }, [project.id, setNodes, setEdges, attachNodeHandlers]);
 
   useEffect(() => {
+    schemaCache.current = null;
+    setSchema(null);
+    setNodes([]);
+    setEdges([]);
+    setRegenProposal(null);
+    setIsRegenDiffOpen(false);
     loadSchema();
-  }, [loadSchema]);
+  }, [project.id, loadSchema]);
 
-  const handleGenerate = async (typeOverride?: 'table' | 'document') => {
+  const handleGenerate = async () => {
     setIsGenerating(true);
     setError(null);
-    const targetType = typeOverride || schema?.schema_type || 'table';
-    const res = await databaseSchemaApi.generateSchema(project.id, targetType);
-    if (res.data?.schema) {
-      setSchema(res.data.schema);
-      const readyNodes = attachNodeHandlers(res.data.schema.nodes || []);
-      setNodes(readyNodes);
-      setEdges(res.data.schema.edges || []);
-      setHasUnsavedChanges(false);
-      setHistory([]);
-      setRedoStack([]);
-      schemaCache.current[res.data.schema.schema_type as 'table' | 'document'] = res.data.schema;
-      setTimeout(() => {
-        reactFlowInstance.current?.fitView?.({ padding: 0.2 });
-      }, 80);
-    } else {
-      setError(
-        typeof res.error === 'object' && res.error?.error
-          ? String(res.error.error)
-          : 'Failed to generate database schema. Please try again.'
-      );
+    try {
+      const res = await databaseSchemaApi.generateSchema(project.id);
+      const data = res.data;
+      if (data?.schema) {
+        setSchema(data.schema);
+        schemaCache.current = data.schema;
+        const readyNodes = attachNodeHandlers(data.schema.nodes || []);
+        setNodes(readyNodes);
+        setEdges(data.schema.edges || []);
+        setHasUnsavedChanges(false);
+        setHistory([]);
+        setRedoStack([]);
+        setTimeout(() => {
+          reactFlowInstance.current?.fitView?.({ padding: 0.2 });
+        }, 80);
+      } else {
+        const errMsg =
+          typeof res.error === 'object' && res.error?.error
+            ? String(res.error.error)
+            : typeof res.error === 'object' && res.error?.detail
+            ? String(res.error.detail)
+            : typeof res.error === 'string'
+            ? res.error
+            : 'Failed to generate database schema. Please try again.';
+        setError(errMsg);
+      }
+    } catch (err: any) {
+      setError(err instanceof Error ? err.message : 'Failed to generate database schema. Please try again.');
+    } finally {
+      setIsGenerating(false);
     }
-    setIsGenerating(false);
-  };
-
-  const handleSwitchType = async (targetType: 'table' | 'document') => {
-    if (schema && schema.schema_type === targetType) return;
-    if (schema) {
-      schemaCache.current[schema.schema_type as 'table' | 'document'] = {
-        ...schema,
-        nodes: nodesRef.current,
-        edges: edgesRef.current,
-      };
-    }
-    const cached = schemaCache.current[targetType];
-    if (cached) {
-      setSchema(cached);
-      const readyNodes = attachNodeHandlers(cached.nodes || []);
-      setNodes(readyNodes);
-      setEdges(cached.edges || []);
-      setHasUnsavedChanges(false);
-      setHistory([]);
-      setRedoStack([]);
-      setTimeout(() => {
-        reactFlowInstance.current?.fitView?.({ padding: 0.2 });
-      }, 80);
-      return;
-    }
-
-    setIsLoading(true);
-    const dbRes = await databaseSchemaApi.getSchema(project.id, targetType);
-    if (dbRes.data?.exists && dbRes.data.schema) {
-      setSchema(dbRes.data.schema);
-      const readyNodes = attachNodeHandlers(dbRes.data.schema.nodes || []);
-      setNodes(readyNodes);
-      setEdges(dbRes.data.schema.edges || []);
-      setHasUnsavedChanges(false);
-      setHistory([]);
-      setRedoStack([]);
-      schemaCache.current[targetType] = dbRes.data.schema;
-      setIsLoading(false);
-      setTimeout(() => {
-        reactFlowInstance.current?.fitView?.({ padding: 0.2 });
-      }, 80);
-      return;
-    }
-    setIsLoading(false);
-
-    await handleGenerate(targetType);
   };
 
   const handleUndo = useCallback(() => {
@@ -508,7 +484,7 @@ export function DatabaseSchemaCanvas({
     if (res.data?.schema) {
       setSchema(res.data.schema);
       setHasUnsavedChanges(false);
-      schemaCache.current[res.data.schema.schema_type as 'table' | 'document'] = res.data.schema;
+      schemaCache.current = res.data.schema;
     } else {
       setError('Failed to save database schema.');
     }
@@ -522,6 +498,7 @@ export function DatabaseSchemaCanvas({
     const res = await databaseSchemaApi.resetSchema(project.id);
     if (res.data?.schema) {
       setSchema(res.data.schema);
+      schemaCache.current = res.data.schema;
       const readyNodes = attachNodeHandlers(res.data.schema.nodes || []);
       setNodes(readyNodes);
       setEdges(res.data.schema.edges || []);
@@ -533,6 +510,59 @@ export function DatabaseSchemaCanvas({
       }, 80);
     }
     setIsLoading(false);
+  };
+
+  const handleApplyProposal = async () => {
+    if (!schema?.pending_proposal) return;
+    setIsApplyingProposal(true);
+    setProposalStaleError(null);
+    const res = await databaseSchemaApi.applyProposal(project.id, {
+      roadmap_version: schema.pending_proposal.roadmap_version,
+    });
+    if (res.data) {
+      setSchema(res.data);
+      schemaCache.current = res.data;
+      const readyNodes = attachNodeHandlers(res.data.nodes || []);
+      setNodes(readyNodes);
+      setEdges(res.data.edges || []);
+      setHasUnsavedChanges(false);
+    } else {
+      const errObj = res.error as any;
+      if (errObj?.is_stale || errObj?.error?.includes('outdated') || errObj?.error?.includes('STALE_PROPOSAL')) {
+        setProposalStaleError(errObj.error || 'This proposal is outdated because the roadmap was updated.');
+      } else {
+        setError(typeof res.error === 'object' && res.error?.error ? String(res.error.error) : 'Failed to apply schema proposal');
+      }
+    }
+    setIsApplyingProposal(false);
+  };
+
+  const handleDismissProposal = async () => {
+    if (!schema) return;
+    setIsApplyingProposal(true);
+    const res = await databaseSchemaApi.dismissProposal(project.id);
+    if (res.data) {
+      setSchema(res.data);
+      schemaCache.current = res.data;
+      setProposalStaleError(null);
+    } else {
+      setError(typeof res.error === 'object' && res.error?.error ? String(res.error.error) : 'Failed to dismiss proposal');
+    }
+    setIsApplyingProposal(false);
+  };
+
+  const handleRefreshProposal = async () => {
+    if (!schema) return;
+    setIsApplyingProposal(true);
+    const res = await databaseSchemaApi.refreshProposal(project.id);
+    if (res.data) {
+      setSchema(res.data);
+      schemaCache.current = res.data;
+      setProposalStaleError(null);
+    } else {
+      setError(typeof res.error === 'object' && res.error?.error ? String(res.error.error) : 'Failed to refresh proposal');
+    }
+    setIsApplyingProposal(false);
   };
 
   const handleAddEntity = () => {
@@ -581,15 +611,71 @@ export function DatabaseSchemaCanvas({
     setHasUnsavedChanges(true);
   };
 
+  const handleStartRegenerate = async () => {
+    setIsGenerating(true);
+    setError(null);
+    setRegenStaleError(null);
+    try {
+      const res = await databaseSchemaApi.previewRegeneration(project.id);
+      if (res.data) {
+        setRegenProposal(res.data);
+        setIsRegenDiffOpen(true);
+      } else {
+        const errorMsg =
+          typeof res.error === 'object' && res.error?.error
+            ? String(res.error.error)
+            : typeof res.error === 'object' && res.error?.detail
+            ? String(res.error.detail)
+            : typeof res.error === 'string'
+            ? res.error
+            : 'Failed to generate schema proposal.';
+        setError(errorMsg);
+      }
+    } catch (err: any) {
+      setError(err instanceof Error ? err.message : 'Failed to generate schema proposal.');
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+
+  const handleConfirmRegeneration = async (proposalToConfirm: DatabaseSchemaProposalDiff) => {
+    setIsSavingRegen(true);
+    setRegenStaleError(null);
+    const res = await databaseSchemaApi.confirmRegeneration(project.id, {
+      proposal: proposalToConfirm,
+      roadmap_version: proposalToConfirm.roadmap_version,
+      schema_version: proposalToConfirm.schema_version,
+    });
+    if (res.data?.schema) {
+      setSchema(res.data.schema);
+      schemaCache.current = res.data.schema;
+      const readyNodes = attachNodeHandlers(res.data.schema.nodes || []);
+      setNodes(readyNodes);
+      setEdges(res.data.schema.edges || []);
+      setHasUnsavedChanges(false);
+      setHistory([]);
+      setRedoStack([]);
+      setIsRegenDiffOpen(false);
+      setRegenProposal(null);
+      setTimeout(() => {
+        reactFlowInstance.current?.fitView?.({ padding: 0.2 });
+      }, 80);
+    } else {
+      const errObj = res.error as any;
+      if (errObj?.is_stale || errObj?.error?.includes('STALE_REGENERATION') || errObj?.error?.includes('modified') || errObj?.error?.includes('updated')) {
+        setRegenStaleError(errObj.error || 'The roadmap or schema was updated during generation. Please regenerate.');
+      } else {
+        setError(typeof res.error === 'object' && res.error?.error ? String(res.error.error) : 'Failed to save regenerated database schemas.');
+      }
+    }
+    setIsSavingRegen(false);
+  };
+
   useEffect(() => {
     onRegisterRegenerate?.(() => {
-      if (schema) {
-        handleGenerate(schema.schema_type);
-      } else {
-        handleGenerate();
-      }
+      handleStartRegenerate();
     });
-  }, [onRegisterRegenerate, schema]);
+  }, [onRegisterRegenerate]);
 
   useEffect(() => {
     onGeneratingChange?.(isGenerating);
@@ -599,11 +685,37 @@ export function DatabaseSchemaCanvas({
   const canPaste = Boolean(clipboard && clipboard.nodes.length > 0);
 
   return (
-    <div className="w-full h-full flex-1 flex flex-col relative font-['Plus_Jakarta_Sans',sans-serif] overflow-hidden">
+    <div className="database-schema-canvas w-full h-full flex-1 flex flex-col relative font-['Plus_Jakarta_Sans',sans-serif] overflow-hidden">
+      <style>{`
+        .database-schema-canvas,
+        .database-schema-canvas .react-flow,
+        .database-schema-canvas .react-flow__pane,
+        .database-schema-canvas .react-flow__viewport {
+          cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='%23000000' stroke='%23ffffff' stroke-width='1.5'%3E%3Cpolygon points='2,2 2,19 7,14 11,21 13.5,19.5 9.5,12.5 16,12.5'/%3E%3C/svg%3E") 2 2, default !important;
+        }
+        .database-schema-canvas .react-flow__pane.dragging,
+        .database-schema-canvas .react-flow__pane:active {
+          cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='%23000000' stroke='%23ffffff' stroke-width='1.5'%3E%3Cpath d='M10 2a1 1 0 0 1 1 1v5a1 1 0 0 1 2 0V4a1 1 0 0 1 2 0v5a1 1 0 0 1 2 0V6a1 1 0 0 1 2 0v8a6 6 0 0 1-6 6H9a6 6 0 0 1-5.6-3.8L2.2 14a1 1 0 0 1 1.6-1.2L6 15V3a1 1 0 0 1 2-1h2z'/%3E%3C/svg%3E") 10 10, grabbing !important;
+        }
+        .database-schema-canvas .react-flow__node,
+        .database-schema-canvas .react-flow__node *,
+        .database-schema-canvas .react-flow__handle,
+        .database-schema-canvas .react-flow__handle *,
+        .database-schema-canvas button,
+        .database-schema-canvas button * {
+          cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='%23000000' stroke='%23ffffff' stroke-width='1.5'%3E%3Cpath d='M8 1a1 1 0 0 1 1 1v8h1V4a1 1 0 0 1 2 0v7h1V6a1 1 0 0 1 2 0v5h1V8a1 1 0 0 1 2 0v7a6 6 0 0 1-6 6H9a6 6 0 0 1-5.6-3.8L2.2 14a1 1 0 0 1 1.6-1.2L6 15V2a1 1 0 0 1 2-1z'/%3E%3C/svg%3E") 8 1, pointer !important;
+        }
+        .database-schema-canvas input,
+        .database-schema-canvas textarea {
+          cursor: text !important;
+          caret-color: #000000 !important;
+        }
+      `}</style>
       {schema && (
         <DatabaseSchemaHeader
           schemaType={schema.schema_type}
           dbEngine={schema.db_engine}
+          hasConflict={Boolean(schema.has_conflict)}
           hasUnsavedChanges={hasUnsavedChanges}
           isSaving={isSaving}
           historyLength={history.length}
@@ -617,7 +729,6 @@ export function DatabaseSchemaCanvas({
           onPaste={handlePaste}
           onEditSelected={handleEditSelected}
           onDeleteSelected={handleDeleteSelected}
-          onSwitchType={handleSwitchType}
           onAddEntity={handleAddEntity}
           onOpenExport={() => setIsExportOpen(true)}
           onResetLayout={handleResetLayout}
@@ -647,8 +758,114 @@ export function DatabaseSchemaCanvas({
         </div>
       )}
 
+      {schema?.pending_proposal && schema.pending_proposal.has_changes && (
+        <div
+          className={`mx-6 mt-3 p-4 rounded-2xl border transition-all shadow-sm ${
+            proposalStaleError
+              ? isDark
+                ? 'bg-amber-950/30 border-amber-500/40 text-amber-200'
+                : 'bg-amber-50 border-amber-300 text-amber-900'
+              : isDark
+              ? 'bg-[#18191D] border-[#FFC900]/30 text-[#F5F3EF]'
+              : 'bg-[#FFFDF8] border-[#D9A300]/30 text-[#171717]'
+          }`}
+        >
+          <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
+            <div className="flex-1 space-y-1.5">
+              <div className="flex items-center gap-2 flex-wrap">
+                <Sparkles className="w-4 h-4 text-[#FFC900]" />
+                <span className="font-bold text-xs uppercase tracking-wider text-[#FFC900]">
+                  Roadmap-Driven Schema Proposal
+                </span>
+                {proposalStaleError ? (
+                  <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-rose-500/20 text-rose-400 border border-rose-500/30">
+                    Stale Proposal
+                  </span>
+                ) : (
+                  <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                    Roadmap Synchronized
+                  </span>
+                )}
+                {schema.pending_proposal.affected_entities && schema.pending_proposal.affected_entities.length > 0 && (
+                  <div className="flex items-center gap-1">
+                    {schema.pending_proposal.affected_entities.map((ent) => (
+                      <span
+                        key={ent}
+                        className={`px-1.5 py-0.5 rounded text-[11px] font-mono font-medium ${
+                          isDark ? 'bg-white/10 text-white' : 'bg-black/5 text-black'
+                        }`}
+                      >
+                        {ent}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {schema.pending_proposal.summary && (
+                <p className="text-xs font-semibold leading-snug">
+                  {schema.pending_proposal.summary}
+                </p>
+              )}
+
+              {schema.pending_proposal.rationale && (
+                <p className={`text-[11px] leading-relaxed ${isDark ? 'text-[#A6A4A0]' : 'text-[#6B665E]'}`}>
+                  {schema.pending_proposal.rationale}
+                </p>
+              )}
+
+              {schema.pending_proposal.modeling_notes && (
+                <p className={`text-[11px] font-mono ${isDark ? 'text-[#FFC900]/80' : 'text-[#B88700]'}`}>
+                  {schema.pending_proposal.modeling_notes}
+                </p>
+              )}
+
+              {proposalStaleError && (
+                <p className="text-xs font-medium text-rose-400 mt-1">
+                  {proposalStaleError}
+                </p>
+              )}
+            </div>
+
+            <div className="flex items-center gap-2 shrink-0 self-end sm:self-center">
+              {proposalStaleError ? (
+                <button
+                  type="button"
+                  onClick={handleRefreshProposal}
+                  disabled={isApplyingProposal}
+                  className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-[#FFC900] text-[#08090B] hover:brightness-110 cursor-pointer disabled:opacity-50"
+                >
+                  {isApplyingProposal ? 'Updating...' : 'Update Proposal'}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={handleApplyProposal}
+                  disabled={isApplyingProposal}
+                  className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-[#FFC900] text-[#08090B] hover:brightness-110 cursor-pointer disabled:opacity-50"
+                >
+                  {isApplyingProposal ? 'Applying...' : 'Apply Schema Changes'}
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={handleDismissProposal}
+                disabled={isApplyingProposal}
+                className={`px-2.5 py-1.5 rounded-lg text-xs font-medium border cursor-pointer ${
+                  isDark
+                    ? 'border-[#343330] text-[#A6A4A0] hover:text-[#F5F3EF]'
+                    : 'border-[#E8E1D5] text-[#6B665E] hover:text-[#171717]'
+                }`}
+              >
+                Dismiss
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="flex-1 w-full h-full relative flex flex-col overflow-hidden">
-        {isLoading || isGenerating ? (
+        {isLoading || (!schema && isGenerating) ? (
           <div
             className={`flex-1 flex flex-col items-center justify-center p-12 text-center ${
               isDark ? 'bg-[#08090B]' : 'bg-[#F7F3EA]'
@@ -758,36 +975,21 @@ export function DatabaseSchemaCanvas({
                 isDark ? 'text-[#A6A4A0]' : 'text-[#6B665E]'
               }`}
             >
-              Generate SQL tables or NoSQL collections for {project.name}.
+              Generate database schema for {project.name} matching your project tech stack and roadmap.
             </p>
 
-            <div className="flex flex-wrap items-center justify-center gap-3">
-              <button
-                type="button"
-                onClick={() => handleGenerate('table')}
-                className={`inline-flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold transition-all shadow-md cursor-pointer ${
-                  isDark
-                    ? 'bg-[#FFC900] text-[#08090B] hover:brightness-110'
-                    : 'bg-[#D9A300] text-white hover:brightness-105'
-                }`}
-              >
-                <Sparkles className="w-4 h-4" />
-                <span>SQL Tables</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => handleGenerate('document')}
-                className={`inline-flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold border transition-all shadow-xs cursor-pointer ${
-                  isDark
-                    ? 'border-[#242321] bg-[#18191D] text-[#F5F3EF] hover:border-[#FFC900]'
-                    : 'border-[#E8E1D5] bg-white text-[#171717] hover:border-[#D9A300]'
-                }`}
-              >
-                <Database className="w-4 h-4 text-emerald-500" />
-                <span>NoSQL Collections</span>
-              </button>
-            </div>
+            <button
+              type="button"
+              onClick={handleGenerate}
+              className={`inline-flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold transition-all shadow-md cursor-pointer ${
+                isDark
+                  ? 'bg-[#FFC900] text-[#08090B] hover:brightness-110'
+                  : 'bg-[#D9A300] text-white hover:brightness-105'
+              }`}
+            >
+              <Sparkles className="w-4 h-4" />
+              <span>Generate Schema</span>
+            </button>
           </div>
         )}
 
@@ -805,10 +1007,23 @@ export function DatabaseSchemaCanvas({
       <ExportCodeModal
         isOpen={isExportOpen}
         onClose={() => setIsExportOpen(false)}
-        sqlDdl={schema?.sql_ddl || ''}
-        nosqlCode={schema?.nosql_code || ''}
+        code={schema?.code || schema?.sql_ddl || schema?.nosql_code || ''}
         schemaType={schema?.schema_type || 'table'}
+        dbEngine={schema?.db_engine || 'Database'}
         projectName={project.name}
+      />
+
+      <RegenerateDiffModal
+        isOpen={isRegenDiffOpen}
+        onClose={() => {
+          setIsRegenDiffOpen(false);
+          setRegenStaleError(null);
+        }}
+        proposal={regenProposal}
+        isSaving={isSavingRegen}
+        staleError={regenStaleError}
+        onConfirm={handleConfirmRegeneration}
+        onRegenerateFresh={handleStartRegenerate}
       />
     </div>
   );

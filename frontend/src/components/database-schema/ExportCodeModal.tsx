@@ -1,34 +1,31 @@
 import { useState } from 'react';
-import { X, Copy, Check, Download, Code2, Database } from 'lucide-react';
+import { X, Copy, Check, Download, Code2, Database, FileCode2 } from 'lucide-react';
 import { useTheme } from '../../context/ThemeContext';
 
 interface ExportCodeModalProps {
   isOpen: boolean;
   onClose: () => void;
-  sqlDdl: string;
-  nosqlCode: string;
+  code: string;
   schemaType: 'table' | 'document';
+  dbEngine: string;
   projectName: string;
 }
 
 export function ExportCodeModal({
   isOpen,
   onClose,
-  sqlDdl,
-  nosqlCode,
+  code,
   schemaType,
+  dbEngine,
   projectName,
 }: ExportCodeModalProps) {
   const { theme } = useTheme();
   const isDark = theme === 'dark';
-  const [activeTab, setActiveTab] = useState<'sql' | 'nosql'>(
-    schemaType === 'document' ? 'nosql' : 'sql'
-  );
   const [copied, setCopied] = useState(false);
 
   if (!isOpen) return null;
 
-  const codeToShow = activeTab === 'sql' ? (sqlDdl || '-- No SQL script generated') : (nosqlCode || '// No Mongoose schema generated');
+  const codeToShow = code || (schemaType === 'document' ? 'Document schema code unavailable' : 'SQL DDL statements unavailable');
 
   const handleCopy = async () => {
     try {
@@ -39,7 +36,8 @@ export function ExportCodeModal({
   };
 
   const handleDownload = () => {
-    const filename = activeTab === 'sql' ? `${projectName.toLowerCase().replace(/\s+/g, '_')}_schema.sql` : `${projectName.toLowerCase().replace(/\s+/g, '_')}_schema.ts`;
+    const ext = schemaType === 'document' ? 'ts' : 'sql';
+    const filename = `${projectName.toLowerCase().replace(/\s+/g, '_')}_${dbEngine.toLowerCase()}_schema.${ext}`;
     const blob = new Blob([codeToShow], { type: 'text/plain;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
@@ -88,7 +86,7 @@ export function ExportCodeModal({
                   isDark ? 'text-[#A6A4A0]' : 'text-[#6B665E]'
                 }`}
               >
-                Copy or download ready-to-use database migration scripts
+                Copy or download ready-to-use migration scripts for {dbEngine}
               </p>
             </div>
           </div>
@@ -114,38 +112,20 @@ export function ExportCodeModal({
           }`}
         >
           <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => setActiveTab('sql')}
-              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-semibold transition-all cursor-pointer ${
-                activeTab === 'sql'
-                  ? isDark
-                    ? 'bg-[#FFC900] text-[#08090B] font-bold shadow-xs'
-                    : 'bg-[#D9A300] text-white font-bold shadow-xs'
-                  : isDark
-                  ? 'text-[#A6A4A0] hover:text-[#F5F3EF]'
-                  : 'text-[#6B665E] hover:text-[#171717]'
+            <span
+              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-semibold border ${
+                isDark
+                  ? 'border-[#242321] bg-[#18191D] text-[#F5F3EF]'
+                  : 'border-[#E8E1D5] bg-white text-[#171717]'
               }`}
             >
-              <Database className="w-3.5 h-3.5" />
-              <span>SQL DDL</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveTab('nosql')}
-              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-semibold transition-all cursor-pointer ${
-                activeTab === 'nosql'
-                  ? isDark
-                    ? 'bg-[#FFC900] text-[#08090B] font-bold shadow-xs'
-                    : 'bg-[#D9A300] text-white font-bold shadow-xs'
-                  : isDark
-                  ? 'text-[#A6A4A0] hover:text-[#F5F3EF]'
-                  : 'text-[#6B665E] hover:text-[#171717]'
-              }`}
-            >
-              <Code2 className="w-3.5 h-3.5" />
-              <span>Mongoose / TypeScript</span>
-            </button>
+              {schemaType === 'document' ? (
+                <FileCode2 className="w-3.5 h-3.5 text-emerald-500" />
+              ) : (
+                <Database className="w-3.5 h-3.5 text-amber-500" />
+              )}
+              <span>{dbEngine} ({schemaType === 'document' ? 'NoSQL Document Code' : 'SQL DDL'})</span>
+            </span>
           </div>
 
           <div className="flex items-center gap-2">
