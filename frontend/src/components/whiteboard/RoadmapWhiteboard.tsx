@@ -16,6 +16,9 @@ import type { WhiteboardNode, WhiteboardEdge } from '../../services/whiteboardAp
 import type { Roadmap } from '../../services/roadmapApi';
 import { nodeTypes } from './customNodes';
 import { WhiteboardHeader } from './WhiteboardHeader';
+import { WhiteboardCursorStyles } from './WhiteboardCursorStyles';
+import { useWhiteboardHistory } from './useWhiteboardHistory';
+import { useWhiteboardClipboard } from './useWhiteboardClipboard';
 import { EditNodeModal } from './EditNodeModal';
 import { ResetLayoutModal } from './ResetLayoutModal';
 import { useTheme } from '../../context/ThemeContext';
@@ -40,9 +43,7 @@ export function RoadmapWhiteboard({ projectId, roadmap, onCanvasClick }: Roadmap
   const [editingNode, setEditingNode] = useState<{ id: string; title: string; description: string } | null>(null);
   const [confirmResetOpen, setConfirmResetOpen] = useState(false);
 
-  const [history, setHistory] = useState<{ nodes: Node[]; edges: Edge[] }[]>([]);
-  const [redoStack, setRedoStack] = useState<{ nodes: Node[]; edges: Edge[] }[]>([]);
-  const [clipboard, setClipboard] = useState<{ nodes: Node[]; isCut?: boolean } | null>(null);
+
   const dragStartSnapshot = useRef<{ nodes: Node[]; edges: Edge[] } | null>(null);
 
   const nodesRef = useRef<Node[]>([]);
@@ -52,10 +53,21 @@ export function RoadmapWhiteboard({ projectId, roadmap, onCanvasClick }: Roadmap
 
   const reactFlowInstance = useRef<any>(null);
 
-  const pushHistory = useCallback((currentNodes: Node[], currentEdges: Edge[]) => {
-    setHistory((prev) => [...prev.slice(-30), { nodes: currentNodes, edges: currentEdges }]);
-    setRedoStack([]);
-  }, []);
+  const {
+    history,
+    setHistory,
+    redoStack,
+    setRedoStack,
+    pushHistory,
+    handleUndo,
+    handleRedo,
+  } = useWhiteboardHistory({
+    nodesRef,
+    edgesRef,
+    setNodes,
+    setEdges,
+    setHasUnsavedChanges,
+  });
 
   const handleEditNode = useCallback((nodeId: string) => {
     setNodes((currentNodes) => {
@@ -127,66 +139,18 @@ export function RoadmapWhiteboard({ projectId, roadmap, onCanvasClick }: Roadmap
     };
   }, [projectId, attachNodeCallbacks, setNodes, setEdges]);
 
-  const handleUndo = useCallback(() => {
-    if (history.length === 0) return;
-    const previous = history[history.length - 1];
-    setRedoStack((prev) => [...prev, { nodes: nodesRef.current, edges: edgesRef.current }]);
-    setHistory((prev) => prev.slice(0, prev.length - 1));
-    setNodes(previous.nodes);
-    setEdges(previous.edges);
-    setHasUnsavedChanges(true);
-  }, [history, setNodes, setEdges]);
 
-  const handleRedo = useCallback(() => {
-    if (redoStack.length === 0) return;
-    const next = redoStack[redoStack.length - 1];
-    setHistory((prev) => [...prev, { nodes: nodesRef.current, edges: edgesRef.current }]);
-    setRedoStack((prev) => prev.slice(0, prev.length - 1));
-    setNodes(next.nodes);
-    setEdges(next.edges);
-    setHasUnsavedChanges(true);
-  }, [redoStack, setNodes, setEdges]);
 
-  const handleCopy = useCallback(() => {
-    const selected = nodesRef.current.filter((n) => n.selected);
-    if (selected.length === 0) return;
-    setClipboard({ nodes: JSON.parse(JSON.stringify(selected)), isCut: false });
-  }, []);
-
-  const handleCut = useCallback(() => {
-    const selected = nodesRef.current.filter((n) => n.selected);
-    if (selected.length === 0) return;
-    pushHistory(nodesRef.current, edgesRef.current);
-    setClipboard({ nodes: JSON.parse(JSON.stringify(selected)), isCut: true });
-    const selectedIds = new Set(selected.map((n) => n.id));
-    setNodes((nds) => nds.filter((n) => !selectedIds.has(n.id)));
-    setEdges((eds) => eds.filter((e) => !selectedIds.has(e.source) && !selectedIds.has(e.target)));
-    setHasUnsavedChanges(true);
-  }, [pushHistory, setNodes, setEdges]);
-
-  const handlePaste = useCallback(() => {
-    if (!clipboard || clipboard.nodes.length === 0) return;
-    pushHistory(nodesRef.current, edgesRef.current);
-    const newNodes: Node[] = clipboard.nodes.map((node, idx) => {
-      const newId = `${node.data?.nodeType || 'node'}-${Date.now()}-${idx}`;
-      return {
-        ...node,
-        id: newId,
-        position: {
-          x: node.position.x + 30,
-          y: node.position.y + 30,
-        },
-        selected: true,
-        data: {
-          ...node.data,
-          onEdit: handleEditNode,
-          onDelete: handleDeleteNode,
-        },
-      };
-    });
-    setNodes((nds) => [...nds.map((n) => ({ ...n, selected: false })), ...newNodes]);
-    setHasUnsavedChanges(true);
-  }, [clipboard, pushHistory, handleEditNode, handleDeleteNode, setNodes]);
+  const { handleCopy, handleCut, handlePaste } = useWhiteboardClipboard({
+    nodesRef,
+    edgesRef,
+    setNodes,
+    setEdges,
+    pushHistory,
+    setHasUnsavedChanges,
+    handleEditNode,
+    handleDeleteNode,
+  });
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -404,32 +368,8 @@ export function RoadmapWhiteboard({ projectId, roadmap, onCanvasClick }: Roadmap
   }, [edges, selectedPhaseFilter, visibleNodeIds]);
 
   return (
-    <div className="whiteboard-canvas w-full h-full flex flex-col bg-white overflow-hidden relative">
-      <style>{`
-        .whiteboard-canvas,
-        .whiteboard-canvas .react-flow,
-        .whiteboard-canvas .react-flow__pane,
-        .whiteboard-canvas .react-flow__viewport {
-          cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='%23000000' stroke='%23ffffff' stroke-width='1.5'%3E%3Cpolygon points='2,2 2,19 7,14 11,21 13.5,19.5 9.5,12.5 16,12.5'/%3E%3C/svg%3E") 2 2, default !important;
-        }
-        .whiteboard-canvas .react-flow__pane.dragging,
-        .whiteboard-canvas .react-flow__pane:active {
-          cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='%23000000' stroke='%23ffffff' stroke-width='1.5'%3E%3Cpath d='M10 2a1 1 0 0 1 1 1v5a1 1 0 0 1 2 0V4a1 1 0 0 1 2 0v5a1 1 0 0 1 2 0V6a1 1 0 0 1 2 0v8a6 6 0 0 1-6 6H9a6 6 0 0 1-5.6-3.8L2.2 14a1 1 0 0 1 1.6-1.2L6 15V3a1 1 0 0 1 2-1h2z'/%3E%3C/svg%3E") 10 10, grabbing !important;
-        }
-        .whiteboard-canvas .react-flow__node,
-        .whiteboard-canvas .react-flow__node *,
-        .whiteboard-canvas .react-flow__handle,
-        .whiteboard-canvas .react-flow__handle *,
-        .whiteboard-canvas button,
-        .whiteboard-canvas button * {
-          cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='%23000000' stroke='%23ffffff' stroke-width='1.5'%3E%3Cpath d='M8 1a1 1 0 0 1 1 1v8h1V4a1 1 0 0 1 2 0v7h1V6a1 1 0 0 1 2 0v5h1V8a1 1 0 0 1 2 0v7a6 6 0 0 1-6 6H9a6 6 0 0 1-5.6-3.8L2.2 14a1 1 0 0 1 1.6-1.2L6 15V2a1 1 0 0 1 2-1z'/%3E%3C/svg%3E") 8 1, pointer !important;
-        }
-        .whiteboard-canvas input,
-        .whiteboard-canvas textarea {
-          cursor: text !important;
-          caret-color: #000000 !important;
-        }
-      `}</style>
+    <div className={`whiteboard-canvas w-full h-full flex flex-col overflow-hidden relative ${isDark ? 'bg-[#08090B]' : 'bg-[#F7F3EA]'}`}>
+      <WhiteboardCursorStyles />
 
       <WhiteboardHeader
         roadmap={roadmap}
