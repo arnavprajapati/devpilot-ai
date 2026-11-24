@@ -148,28 +148,40 @@ class RoadmapCopilotPromptHelper:
         elif action in ['update_roadmap', 'update_tech_stack']:
             affected = data.get('affected_phases')
             if isinstance(affected, list):
+                used_phase_ids = set()
                 for p in affected:
-                    if isinstance(p, dict):
-                        p_order = p.get('order')
-                        p_title = (p.get('title') or '').strip().lower()
-                        p_id = p.get('id')
-                        matched = None
-                        if p_id:
-                            try:
-                                matched = roadmap.phases.filter(id=int(p_id)).first()
-                            except (ValueError, TypeError):
-                                pass
-                        if not matched and p_order:
-                            try:
-                                matched = roadmap.phases.filter(order=int(p_order)).first()
-                            except (ValueError, TypeError):
-                                pass
-                        if not matched and p_title:
-                            matched = roadmap.phases.filter(title__iexact=p_title).first()
-                        if matched:
-                            p['id'] = matched.id
-                            p['target_phase_id'] = matched.id
-                            p['order'] = matched.order
+                    if not isinstance(p, dict):
+                        continue
+                    p_id = p.get('id')
+                    p_title = (p.get('title') or '').strip().lower()
+                    matched = None
+                    if p_id:
+                        try:
+                            matched = roadmap.phases.filter(id=int(p_id)).first()
+                        except (ValueError, TypeError):
+                            pass
+                    if not matched and p_title:
+                        matched = roadmap.phases.filter(title__iexact=p_title).exclude(id__in=used_phase_ids).first()
+                    if matched:
+                        used_phase_ids.add(matched.id)
+                        p['id'] = matched.id
+                        p['target_phase_id'] = matched.id
+                        p['order'] = matched.order
+
+                for p in affected:
+                    if not isinstance(p, dict) or p.get('id'):
+                        continue
+                    p_order = p.get('order')
+                    if p_order:
+                        try:
+                            candidate = roadmap.phases.filter(order=int(p_order)).exclude(id__in=used_phase_ids).first()
+                            if candidate:
+                                used_phase_ids.add(candidate.id)
+                                p['id'] = candidate.id
+                                p['target_phase_id'] = candidate.id
+                                p['order'] = candidate.order
+                        except (ValueError, TypeError):
+                            pass
 
         return data
 
@@ -255,67 +267,36 @@ class RoadmapCopilotPromptHelper:
                 data['explanation'] = "Could you please clarify your request by specifying the exact technology, phase, or tasks you would like to modify?"
             return data
 
-        is_explicit_add_phase = bool(re.search(r'(?i)\b(?:add|create|insert|new)\s+(?:a\s+)?phase\b', prompt_text))
-        if data.get('action') == 'add_phase' and not is_explicit_add_phase:
-            phase_to_merge = data.get('phase_data') or {}
-            target_phase = None
-            if data.get('target_phase_id'):
-                target_phase = roadmap.phases.filter(id=data['target_phase_id']).first()
-            if not target_phase and data.get('target_phase_order'):
-                target_phase = roadmap.phases.filter(order=data['target_phase_order']).first()
-            if not target_phase:
-                target_phase = roadmap.phases.filter(order=2).first() or roadmap.phases.first()
-            if target_phase and phase_to_merge:
-                merged_milestones = []
-                for m in target_phase.milestones.all().order_by('order'):
-                    merged_milestones.append({
-                        'id': m.id,
-                        'title': m.title,
-                        'description': m.description,
-                        'order': m.order,
-                        'tasks': [{'id': t.id, 'title': t.title, 'description': t.description, 'order': t.order, 'is_completed': t.is_completed} for t in m.tasks.all().order_by('order')]
-                    })
-                for new_m in phase_to_merge.get('milestones', []):
-                    merged_milestones.append(new_m)
-                data['action'] = 'edit_phase'
-                data['operation'] = 'add_task'
-                data['target_phase_id'] = target_phase.id
-                data['target_phase_order'] = target_phase.order
-                data['phase_data'] = {
-                    'id': target_phase.id,
-                    'order': target_phase.order,
-                    'title': target_phase.title,
-                    'description': target_phase.description,
-                    'duration': target_phase.duration,
-                    'milestones': merged_milestones,
-                }
-
         if data.get('phase_data'):
             p_data = cls._sanitize_phase_data_structure(data['phase_data'])
-            target_p = None
-            if data.get('target_phase_id'):
-                target_p = roadmap.phases.filter(id=data['target_phase_id']).first()
-            if not target_p and data.get('target_phase_order'):
-                target_p = roadmap.phases.filter(order=data['target_phase_order']).first()
-            if not target_p and p_data.get('title'):
-                target_p = roadmap.phases.filter(title__iexact=p_data['title'].strip()).first()
-            if target_p:
-                p_data['id'] = target_p.id
-                p_data['order'] = target_p.order
-                p_data['target_phase_id'] = target_p.id
-                data['target_phase_id'] = target_p.id
-                data['target_phase_order'] = target_p.order
-                db_task_ids = {t.id for m in target_p.milestones.all() for t in m.tasks.all()}
-                for m in p_data.get('milestones', []):
-                    if isinstance(m, dict):
-                        for t in m.get('tasks', []):
-                            if isinstance(t, dict) and t.get('id') in db_task_ids:
-                                pass
+            if data.get('action') != 'add_phase':
+                target_p = None
+                if data.get('target_phase_id'):
+                    target_p = roadmap.phases.filter(id=data['target_phase_id']).first()
+                if not target_p and data.get('target_phase_order'):
+                    target_p = roadmap.phases.filter(order=data['target_phase_order']).first()
+                if not target_p and p_data.get('title'):
+                    target_p = roadmap.phases.filter(title__iexact=p_data['title'].strip()).first()
+                if target_p:
+                    p_data['id'] = target_p.id
+                    p_data['order'] = target_p.order
+                    p_data['target_phase_id'] = target_p.id
+                    data['target_phase_id'] = target_p.id
+                    data['target_phase_order'] = target_p.order
+            else:
+                p_data['id'] = None
+                p_data['target_phase_id'] = None
             data['phase_data'] = p_data
 
         affected = data.get('affected_phases')
         if isinstance(affected, list) and affected:
             clean_affected = []
+            max_existing_order = 0
+            for existing_p in roadmap.phases.all():
+                if existing_p.order > max_existing_order:
+                    max_existing_order = existing_p.order
+
+            used_phase_ids = set()
             for p in affected:
                 if not isinstance(p, dict):
                     continue
@@ -326,14 +307,17 @@ class RoadmapCopilotPromptHelper:
                         matched = roadmap.phases.filter(id=int(p_id)).first()
                     except (ValueError, TypeError):
                         pass
+                if not matched and p.get('title'):
+                    matched = roadmap.phases.filter(title__iexact=p['title'].strip()).exclude(id__in=used_phase_ids).first()
                 if not matched and p.get('order'):
                     try:
-                        matched = roadmap.phases.filter(order=int(p['order'])).first()
+                        candidate = roadmap.phases.filter(order=int(p['order'])).exclude(id__in=used_phase_ids).first()
+                        if candidate:
+                            matched = candidate
                     except (ValueError, TypeError):
                         pass
-                if not matched and p.get('title'):
-                    matched = roadmap.phases.filter(title__iexact=p['title'].strip()).first()
                 if matched:
+                    used_phase_ids.add(matched.id)
                     p['id'] = matched.id
                     p['order'] = matched.order
                     p['target_phase_id'] = matched.id
@@ -344,6 +328,13 @@ class RoadmapCopilotPromptHelper:
                                 if isinstance(t, dict) and t.get('id') in db_task_ids:
                                     pass
                     clean_affected.append(cls._sanitize_phase_data_structure(p))
+                else:
+                    p['id'] = None
+                    p['target_phase_id'] = None
+                    if not p.get('order'):
+                        max_existing_order += 1
+                        p['order'] = max_existing_order
+                    clean_affected.append(cls._sanitize_phase_data_structure(p))
 
             clean_affected.sort(key=lambda x: x.get('order', 1))
             data['affected_phases'] = clean_affected
@@ -352,12 +343,18 @@ class RoadmapCopilotPromptHelper:
                 data['action'] = 'update_roadmap'
                 data['operation'] = 'update_roadmap'
             elif len(clean_affected) == 1:
-                data['action'] = 'edit_phase'
-                if not data.get('operation') or data['operation'] in ['explanation', 'clarification']:
-                    data['operation'] = 'edit_task'
-                data['target_phase_id'] = clean_affected[0].get('id')
-                data['target_phase_order'] = clean_affected[0].get('order')
-                data['phase_data'] = clean_affected[0]
+                first_p = clean_affected[0]
+                if first_p.get('id'):
+                    data['action'] = 'edit_phase'
+                    if not data.get('operation') or data['operation'] in ['explanation', 'clarification']:
+                        data['operation'] = 'edit_task'
+                    data['target_phase_id'] = first_p.get('id')
+                    data['target_phase_order'] = first_p.get('order')
+                    data['phase_data'] = first_p
+                else:
+                    data['action'] = 'add_phase'
+                    data['operation'] = 'add_phase'
+                    data['phase_data'] = first_p
 
         return data
 

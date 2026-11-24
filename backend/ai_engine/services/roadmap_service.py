@@ -22,28 +22,17 @@ class GeminiRoadmapService:
     @classmethod
     def _build_prompt(cls, project):
         return (
-            f"You are a Principal Software Architect. Generate a complete, production-grade engineering roadmap tailored specifically to the project scope, requirements, and tech stack.\n\n"
+            f"You are a Senior Technical Lead. Create a clean, realistic, and detailed software engineering roadmap for this project, exactly like a real-world developer roadmap.\n\n"
             f"Project Name: {project.name}\n"
             f"Description: {project.description}\n"
             f"Tech Stack: {project.tech_stack or 'Modern Full-Stack'}\n"
             f"Requirements: {project.requirements or 'Standard production architecture'}\n\n"
-            f"Mandatory Phased Architecture Rules:\n"
-            f"1. Generate a COMPLETE roadmap spanning as many distinct, chronological phases as the project needs (minimum 3 to 5 phases). Do NOT cram the entire project into Phase 1.\n"
-            f"2. Strict Dependency Order across phases:\n"
-            f"   - Phase 1 (Foundation & Core Infrastructure): ONLY setup, boilerplate, development environment, base database schema/migrations, and core configuration of the selected tech stack. NEVER put business features, QA, or deployment in Phase 1. Do NOT introduce tools or services missing from the selected tech stack.\n"
-            f"   - Phase 2 (Core Features & Domain Logic): Primary application entities, core business workflows, API routes, and main user interactions.\n"
-            f"   - Phase 3 (Advanced Features & Integrations): Secondary capabilities, third-party integrations, caching, message queues, real-time sync, and notifications.\n"
-            f"   - Phase 4 (Security Auditing, Optimization & QA): End-to-end testing, security audits, vulnerability scans, caching optimizations, and load testing.\n"
-            f"   - Phase 5 (CI/CD, Cloud Deployment & Launch): Build pipeline, container registry, cloud infrastructure provisioning, production deployment, and monitoring.\n"
-            f"3. Each phase MUST have:\n"
-            f"   - A distinct title reflecting its specific goal.\n"
-            f"   - A realistic duration (e.g. '2 Weeks', '3 Weeks', '4 Weeks').\n"
-            f"   - Sequential order (1, 2, 3, ...).\n"
-            f"   - 2 to 3 focused milestones with actionable deliverables.\n"
-            f"4. Under each milestone, provide 2 to 4 actionable tasks tailored specifically to '{project.name}' and its tech stack.\n"
-            f"5. Architecture Source of Truth: The selected Tech Stack ('{project.tech_stack}') is the absolute source of truth. Every phase must remain architecturally consistent with this stack. Never propose unrequested migrations, cloud switches, or removals of core technologies in any phase.\n"
-            f"6. Quota and Limit Rule: For storage quotas or usage limits (such as a 5 GB storage limit), design the UI and backend to present an upgrade prompt allowing the user to choose a plan. NEVER generate automatic purchases, auto-billing, or automatic upgrades without user plan choice.\n"
-            f"7. No generic placeholders. Provide detailed, technical descriptions for every phase, milestone, and task."
+            f"Instructions:\n"
+            f"- Break the project down into clear, natural phases from basic setup to final delivery. Create as many detailed phases as the project genuinely needs.\n"
+            f"- Give each phase a clear, standard engineering heading that describes what is actually being implemented.\n"
+            f"- For each phase, provide detailed milestones and practical, step-by-step developer tasks.\n"
+            f"- Architecture Source of Truth: The selected Tech Stack ('{project.tech_stack}') is the absolute source of truth. Every phase must remain architecturally consistent with this stack. Never propose unrequested migrations, cloud switches, or removals of core technologies in any phase.\n"
+            f"- Quota and Limit Rule: For feature quotas or usage limits, design the UI and backend to present an upgrade prompt allowing the user to choose a plan. NEVER generate automatic purchases, auto-billing, or automatic upgrades without user plan choice."
         )
 
     @classmethod
@@ -102,7 +91,7 @@ class GeminiRoadmapService:
                 system_instruction = (
                     "You are a Principal Software Architect. Generate a production-grade engineering roadmap tailored specifically to the project scope and complexity. "
                     "Split work into ordered logical phases (minimum 3 to 5 phases). Phase 1 is strictly foundation and infrastructure. Later phases must cover core features, integrations, security, and deployment in dependency order. Do not cram everything into Phase 1. "
-                    "The selected tech stack and requirements are the authoritative source of truth. Do not introduce tools missing from the tech stack or unrequested migrations. For storage limits or quotas, always prompt for plan selection rather than automatic upgrades. "
+                    "The selected tech stack and requirements are the authoritative source of truth. Do not introduce tools missing from the tech stack or unrequested migrations. For feature quotas or limits, always prompt for plan selection rather than automatic upgrades. "
                     "Output valid JSON matching this schema: title (str), summary (str), and phases (list of phases each with phase_number (int), title (str), description (str), duration (str), milestones (list of milestones each with title (str), description (str), order (int), tasks (list of tasks each with title (str), description (str), order (int))))."
                 )
                 prompt = cls._build_prompt(project)

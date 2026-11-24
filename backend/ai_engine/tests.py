@@ -472,6 +472,325 @@ class RoadmapAPITests(APITestCase):
         self.assertEqual(p3.milestones.count(), 1)
         self.assertEqual(p3.milestones.first().tasks.count(), 1)
 
+    def test_multi_phase_with_newly_added_phase_is_preserved_and_applied(self):
+        from ai_engine.services import RoadmapCopilotService
+        roadmap = Roadmap.objects.create(project=self.project1, title='Test Multi Phase New', summary='Multi phase new test')
+        p1 = RoadmapPhase.objects.create(roadmap=roadmap, title='Phase 1: Foundation', description='Setup', duration='1 Week', order=1)
+        m1 = RoadmapMilestone.objects.create(phase=p1, title='Infrastructure', description='Base setup', order=1)
+        t1 = m1.tasks.create(title='Init repo', description='Init Git', order=1)
+        p2 = RoadmapPhase.objects.create(roadmap=roadmap, title='Phase 2: Core Files', description='File handling', duration='2 Weeks', order=2)
+        m2 = RoadmapMilestone.objects.create(phase=p2, title='Storage logic', description='Logic', order=1)
+        t2 = m2.tasks.create(title='Upload logic', description='Upload files', order=1)
+
+        mock_ai_output = {
+            'action': 'update_roadmap',
+            'operation': 'update_roadmap',
+            'affected_phases': [
+                {
+                    'id': p1.id,
+                    'order': 1,
+                    'title': 'Phase 1: Foundation & Storage Quota',
+                    'duration': '1 Week',
+                    'milestones': [
+                        {
+                            'id': m1.id,
+                            'title': 'Infrastructure',
+                            'order': 1,
+                            'tasks': [
+                                {'id': t1.id, 'title': 'Init repo', 'description': 'Init Git', 'order': 1, 'is_completed': True},
+                                {'id': None, 'title': 'Configure Storage Limit', 'description': 'Enforce quota', 'order': 2},
+                            ]
+                        }
+                    ]
+                },
+                {
+                    'id': None,
+                    'order': 3,
+                    'title': 'Phase 3: Storage Upgrade & Payments',
+                    'duration': '2 Weeks',
+                    'milestones': [
+                        {
+                            'id': None,
+                            'title': 'Payment Integration',
+                            'order': 1,
+                            'tasks': [
+                                {'id': None, 'title': 'Setup Payment Gateway', 'description': 'Process payments for quota upgrade', 'order': 1},
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }
+
+        resolved = RoadmapCopilotService._apply_generic_roadmap_intent(
+            roadmap=roadmap,
+            data=mock_ai_output,
+            prompt_text="Add storage limit and create a new phase for upgrading storage through payments",
+            current_tech_stack=self.project1.tech_stack
+        )
+        self.assertEqual(resolved['action'], 'update_roadmap')
+        self.assertEqual(len(resolved['affected_phases']), 2)
+        new_phase_entry = resolved['affected_phases'][1]
+        self.assertIsNone(new_phase_entry.get('id'))
+        self.assertEqual(new_phase_entry['title'], 'Phase 3: Storage Upgrade & Payments')
+
+        apply_url = reverse('project-roadmap-apply-action', kwargs={'project_id': self.project1.id})
+        self.client.force_authenticate(user=self.user1)
+        response = self.client.post(apply_url, data={
+            'action': 'update_roadmap',
+            'affected_phases': resolved['affected_phases'],
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        self.assertEqual(roadmap.phases.count(), 3)
+        created_p = roadmap.phases.filter(title='Phase 3: Storage Upgrade & Payments').first()
+        self.assertIsNotNone(created_p)
+        self.assertEqual(created_p.milestones.count(), 1)
+        self.assertEqual(created_p.milestones.first().tasks.count(), 1)
+        self.assertEqual(created_p.milestones.first().tasks.first().title, 'Setup Payment Gateway')
+
+    def test_phase_split_into_two_phases_applies_cleanly(self):
+        from ai_engine.services import RoadmapCopilotService
+        roadmap = Roadmap.objects.create(project=self.project1, title='Test Split Flow', summary='Split flow test')
+        p1 = RoadmapPhase.objects.create(roadmap=roadmap, title='Phase 1: Setup', description='Setup', duration='1 Week', order=1)
+        p2 = RoadmapPhase.objects.create(roadmap=roadmap, title='Phase 2: Core File Management & S3 Integration', description='Combined', duration='3 Weeks', order=2)
+        m2 = RoadmapMilestone.objects.create(phase=p2, title='Files & S3', description='Combined M', order=1)
+        m2.tasks.create(title='Upload to S3', description='Upload S3', order=1)
+        m2.tasks.create(title='List files', description='List files API', order=2)
+
+        split_data = {
+            'action': 'update_roadmap',
+            'operation': 'update_roadmap',
+            'affected_phases': [
+                {
+                    'id': p2.id,
+                    'order': 2,
+                    'title': 'Phase 2: AWS S3 Integration',
+                    'duration': '1 Week',
+                    'milestones': [
+                        {
+                            'title': 'S3 Setup & Client',
+                            'order': 1,
+                            'tasks': [
+                                {'title': 'Configure AWS S3 SDK', 'description': 'Init client', 'order': 1},
+                            ]
+                        }
+                    ]
+                },
+                {
+                    'id': None,
+                    'order': 3,
+                    'title': 'Phase 3: Core File Management',
+                    'duration': '2 Weeks',
+                    'milestones': [
+                        {
+                            'title': 'File CRUD APIs',
+                            'order': 1,
+                            'tasks': [
+                                {'title': 'File Upload & List Endpoint', 'description': 'Upload and listing routes', 'order': 1},
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }
+
+        resolved = RoadmapCopilotService._apply_generic_roadmap_intent(
+            roadmap=roadmap,
+            data=split_data,
+            prompt_text="core file management and s3 integration in different split into diff phase",
+            current_tech_stack=self.project1.tech_stack
+        )
+        self.assertEqual(resolved['action'], 'update_roadmap')
+        self.assertEqual(len(resolved['affected_phases']), 2)
+
+        apply_url = reverse('project-roadmap-apply-action', kwargs={'project_id': self.project1.id})
+        self.client.force_authenticate(user=self.user1)
+        response = self.client.post(apply_url, data={
+            'action': 'update_roadmap',
+            'affected_phases': resolved['affected_phases'],
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        self.assertEqual(roadmap.phases.count(), 3)
+        phases = list(roadmap.phases.all().order_by('order'))
+        self.assertEqual(phases[0].title, 'Phase 1: Setup')
+        self.assertEqual(phases[1].title, 'Phase 2: AWS S3 Integration')
+        self.assertEqual(phases[2].title, 'Phase 3: Core File Management')
+
+    def test_phase_split_without_ids_resolves_and_replaces_old_phase(self):
+        from ai_engine.services import RoadmapCopilotService
+        roadmap = Roadmap.objects.create(project=self.project1, title='Test Split Without IDs', summary='Split flow test')
+        p1 = RoadmapPhase.objects.create(roadmap=roadmap, title='Phase 1: Setup', description='Setup', duration='1 Week', order=1)
+        p2 = RoadmapPhase.objects.create(roadmap=roadmap, title='Phase 2: Core File Management & S3 Integration', description='Combined', duration='3 Weeks', order=2)
+        m2 = RoadmapMilestone.objects.create(phase=p2, title='Files & S3', description='Combined M', order=1)
+        m2.tasks.create(title='Upload to S3', description='Upload S3', order=1)
+
+        raw_split_data = {
+            'action': 'update_roadmap',
+            'operation': 'update_roadmap',
+            'target_phase_order': 2,
+            'affected_phases': [
+                {
+                    'id': None,
+                    'order': 1,
+                    'title': 'Phase 1: Setup',
+                    'duration': '1 Week',
+                    'milestones': [
+                        {
+                            'title': 'Base Setup',
+                            'order': 1,
+                            'tasks': [{'title': 'Init', 'description': 'Init repo', 'order': 1}],
+                        }
+                    ]
+                },
+                {
+                    'id': None,
+                    'order': 2,
+                    'title': 'Phase 2: AWS S3 Integration Layer',
+                    'duration': '1 Week',
+                    'milestones': [
+                        {
+                            'title': 'S3 Setup',
+                            'order': 1,
+                            'tasks': [{'title': 'Init S3 Client', 'description': 'S3 init', 'order': 1}],
+                        }
+                    ]
+                },
+                {
+                    'id': None,
+                    'order': 3,
+                    'title': 'Phase 3: Core File Management APIs',
+                    'duration': '2 Weeks',
+                    'milestones': [
+                        {
+                            'title': 'File CRUD',
+                            'order': 1,
+                            'tasks': [{'title': 'File API Routes', 'description': 'File routes', 'order': 1}],
+                        }
+                    ]
+                }
+            ]
+        }
+
+        resolved = RoadmapCopilotService._resolve_target_phase(
+            roadmap=roadmap,
+            data=raw_split_data,
+            prompt_text="split phase 2 into 2 part core file management and s3 integration"
+        )
+        propagated = RoadmapCopilotService._apply_generic_roadmap_intent(
+            roadmap=roadmap,
+            data=resolved,
+            prompt_text="split phase 2 into 2 part core file management and s3 integration",
+            current_tech_stack=self.project1.tech_stack
+        )
+
+        self.assertEqual(len(propagated['affected_phases']), 3)
+        self.assertEqual(propagated['affected_phases'][0]['id'], p1.id)
+        self.assertEqual(propagated['affected_phases'][1]['id'], p2.id)
+        self.assertIsNone(propagated['affected_phases'][2]['id'])
+
+        apply_url = reverse('project-roadmap-apply-action', kwargs={'project_id': self.project1.id})
+        self.client.force_authenticate(user=self.user1)
+        response = self.client.post(apply_url, data={
+            'action': 'update_roadmap',
+            'target_phase_order': 2,
+            'affected_phases': propagated['affected_phases'],
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        self.assertEqual(roadmap.phases.count(), 3)
+        phases = list(roadmap.phases.all().order_by('order'))
+        self.assertEqual(phases[0].id, p1.id)
+        self.assertEqual(phases[1].id, p2.id)
+        self.assertEqual(phases[1].title, 'Phase 2: AWS S3 Integration Layer')
+        self.assertEqual(phases[2].title, 'Phase 3: Core File Management APIs')
+
+    def test_add_deployment_without_word_phase_retains_add_phase(self):
+        from ai_engine.services import RoadmapCopilotService
+        roadmap = Roadmap.objects.create(project=self.project1, title='Test Add Deployment', summary='Test')
+        p1 = RoadmapPhase.objects.create(roadmap=roadmap, title='Phase 1: Setup', description='Setup', duration='1 Week', order=1)
+        raw_data = {
+            'action': 'add_phase',
+            'operation': 'add_phase',
+            'phase_data': {
+                'title': 'Deployment & CI/CD',
+                'description': 'Deploy frontend on Vercel and backend on Render',
+                'duration': '1 Week',
+                'milestones': [
+                    {
+                        'title': 'Cloud Deployment',
+                        'order': 1,
+                        'tasks': [{'title': 'Deploy to Render', 'description': 'Deploy api', 'order': 1}],
+                    }
+                ]
+            }
+        }
+        res = RoadmapCopilotService._apply_generic_roadmap_intent(
+            roadmap=roadmap,
+            data=raw_data,
+            prompt_text="add deployment also simple on vercel and render",
+            current_tech_stack=self.project1.tech_stack
+        )
+        self.assertEqual(res['action'], 'add_phase')
+        self.assertEqual(res['phase_data']['title'], 'Deployment & CI/CD')
+        self.assertIsNone(res['phase_data'].get('id'))
+
+    def test_update_roadmap_cleans_excluded_duplicate_phases(self):
+        from ai_engine.services import RoadmapCopilotService
+        roadmap = Roadmap.objects.create(project=self.project1, title='Test Clean Duplicates', summary='Test')
+        p1 = RoadmapPhase.objects.create(roadmap=roadmap, title='Phase 1: Foundation', duration='2 Weeks', order=1)
+        p2_dup = RoadmapPhase.objects.create(roadmap=roadmap, title='Phase 2: Core File Management & S3 Integration', duration='3 Weeks', order=2)
+        p3_s3 = RoadmapPhase.objects.create(roadmap=roadmap, title='Phase 3: S3 Integration Layer', duration='1 Week', order=3)
+        p4_core = RoadmapPhase.objects.create(roadmap=roadmap, title='Phase 4: Core File Management', duration='2 Weeks', order=4)
+
+        apply_data = {
+            'action': 'update_roadmap',
+            'target_phase_id': p2_dup.id,
+            'affected_phases': [
+                {
+                    'id': p1.id,
+                    'order': 1,
+                    'title': 'Phase 1: Foundation',
+                    'duration': '2 Weeks',
+                    'milestones': [{'title': 'Setup', 'order': 1, 'tasks': [{'title': 'Init', 'description': 'Init', 'order': 1}]}]
+                },
+                {
+                    'id': p3_s3.id,
+                    'order': 2,
+                    'title': 'Phase 2: S3 Integration Layer',
+                    'duration': '1 Week',
+                    'milestones': [{'title': 'S3 SDK', 'order': 1, 'tasks': [{'title': 'SDK', 'description': 'Init', 'order': 1}]}]
+                },
+                {
+                    'id': p4_core.id,
+                    'order': 3,
+                    'title': 'Phase 3: Core File Management',
+                    'duration': '2 Weeks',
+                    'milestones': [{'title': 'CRUD', 'order': 1, 'tasks': [{'title': 'API', 'description': 'CRUD', 'order': 1}]}]
+                },
+                {
+                    'id': None,
+                    'order': 4,
+                    'title': 'Phase 4: Deployment',
+                    'duration': '1 Week',
+                    'milestones': [{'title': 'Vercel & Render', 'order': 1, 'tasks': [{'title': 'Deploy', 'description': 'Deploy', 'order': 1}]}]
+                }
+            ]
+        }
+        apply_url = reverse('project-roadmap-apply-action', kwargs={'project_id': self.project1.id})
+        self.client.force_authenticate(user=self.user1)
+        response = self.client.post(apply_url, data=apply_data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        self.assertEqual(roadmap.phases.count(), 4)
+        phase_titles = list(roadmap.phases.all().order_by('order').values_list('title', flat=True))
+        self.assertNotIn('Phase 2: Core File Management & S3 Integration', phase_titles)
+        self.assertEqual(phase_titles[0], 'Phase 1: Foundation')
+        self.assertEqual(phase_titles[1], 'Phase 2: S3 Integration Layer')
+        self.assertEqual(phase_titles[2], 'Phase 3: Core File Management')
+        self.assertEqual(phase_titles[3], 'Phase 4: Deployment')
+
     def test_explanation_request_is_read_only(self):
         from ai_engine.services import RoadmapCopilotService
         roadmap = Roadmap.objects.create(project=self.project1, title='Test Flow', summary='Flow test')

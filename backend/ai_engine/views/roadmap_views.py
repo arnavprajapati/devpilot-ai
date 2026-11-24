@@ -327,8 +327,10 @@ class ProjectRoadmapApplyPhaseActionView(APIView):
                 affected_phases = request.data.get('affected_phases') or []
                 if affected_phases:
                     existing_phases_count = roadmap.phases.count()
+                    existing_phase_id_set = set(roadmap.phases.values_list('id', flat=True))
                     is_full_stack_replacement = (action == 'update_tech_stack' and len(affected_phases) >= existing_phases_count)
                     kept_phase_ids = []
+                    matched_existing_ids = 0
 
                     for p_idx, p_item in enumerate(affected_phases, start=1):
                         if not isinstance(p_item, dict):
@@ -346,25 +348,27 @@ class ProjectRoadmapApplyPhaseActionView(APIView):
                             except (ValueError, TypeError):
                                 pass
 
+                        if not target_p and p_title:
+                            target_p = roadmap.phases.filter(title__iexact=p_title).exclude(id__in=kept_phase_ids).first()
+
                         if not target_p and p_order:
                             try:
-                                target_p = roadmap.phases.filter(order=int(p_order)).first()
+                                candidate = roadmap.phases.filter(order=int(p_order)).exclude(id__in=kept_phase_ids).first()
+                                if candidate:
+                                    target_p = candidate
                             except (ValueError, TypeError):
                                 pass
 
-                        if not target_p and p_title:
-                            target_p = roadmap.phases.filter(title__iexact=p_title).first()
-
                         if not target_p and len(affected_phases) == 1 and target_phase_order:
                             try:
-                                target_p = roadmap.phases.filter(order=int(target_phase_order)).first()
+                                target_p = roadmap.phases.filter(order=int(target_phase_order)).exclude(id__in=kept_phase_ids).first()
                             except (ValueError, TypeError):
                                 pass
 
                         if not target_p and len(affected_phases) == 1 and target_phase_id:
                             try:
-                                candidate = roadmap.phases.filter(id=int(target_phase_id)).first()
-                                if candidate and (not p_title or candidate.title.strip().lower() == p_title.lower()):
+                                candidate = roadmap.phases.filter(id=int(target_phase_id)).exclude(id__in=kept_phase_ids).first()
+                                if candidate:
                                     target_p = candidate
                             except (ValueError, TypeError):
                                 pass
@@ -378,10 +382,15 @@ class ProjectRoadmapApplyPhaseActionView(APIView):
                                 target_p.duration = p_dur
                             target_p.save()
                             kept_phase_ids.append(target_p.id)
+                            if target_p.id in existing_phase_id_set:
+                                matched_existing_ids += 1
                             if p_item.get('milestones'):
                                 _sync_milestones_and_tasks(target_p, p_item['milestones'])
-                        elif is_full_stack_replacement:
-                            created_order = p_order if p_order else p_idx
+                        else:
+                            created_order = int(p_order) if p_order else (roadmap.phases.count() + 1)
+                            for shift_p in roadmap.phases.filter(order__gte=created_order).exclude(id__in=kept_phase_ids).order_by('-order'):
+                                shift_p.order += 1
+                                shift_p.save()
                             new_phase = RoadmapPhase.objects.create(
                                 roadmap=roadmap,
                                 title=p_title or f"Phase {created_order}",
@@ -393,7 +402,19 @@ class ProjectRoadmapApplyPhaseActionView(APIView):
                             if p_item.get('milestones'):
                                 _sync_milestones_and_tasks(new_phase, p_item['milestones'])
 
-                    if is_full_stack_replacement and kept_phase_ids:
+                    if target_phase_id and int(target_phase_id) not in kept_phase_ids:
+                        roadmap.phases.filter(id=int(target_phase_id)).delete()
+                    elif not target_phase_id and target_phase_order:
+                        old_target = roadmap.phases.filter(order=int(target_phase_order)).exclude(id__in=kept_phase_ids).first()
+                        if old_target:
+                            old_target.delete()
+
+                    is_comprehensive = is_full_stack_replacement or (
+                        action == 'update_roadmap'
+                        and existing_phases_count > 0
+                        and matched_existing_ids >= existing_phases_count
+                    )
+                    if is_comprehensive and kept_phase_ids:
                         roadmap.phases.exclude(id__in=kept_phase_ids).delete()
 
             _validate_and_sanitize_roadmap_consistency(roadmap)
